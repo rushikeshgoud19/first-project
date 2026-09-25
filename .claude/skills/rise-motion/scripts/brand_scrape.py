@@ -1496,7 +1496,7 @@ async def scrape_site(url, out_root: Path, b, args):
         "screenshot": (rd or {}).get("screenshot"),
         "warnings": warnings,
     }
-    (out / "brand.json").write_text(json.dumps(brand, indent=2, ensure_ascii=False))
+    (out / "brand.json").write_text(json.dumps(brand, indent=2, ensure_ascii=False), encoding="utf-8")
     return out, brand
 
 
@@ -1530,7 +1530,7 @@ def summary(out, brand):
 async def main_async(args):
     urls = list(args.urls)
     if args.file:
-        for line in Path(args.file).read_text().splitlines():
+        for line in Path(args.file).read_text(encoding="utf-8").splitlines():
             line = line.split("#", 1)[0].strip()
             if line:
                 urls.append(line)
@@ -1570,7 +1570,7 @@ async def main_async(args):
             await run_all(None)
     if len(urls) > 1:
         index = [{"url": br["url"], "slug": out.name, "name": br["name"], "theme": br["theme"]} for out, br in results]
-        (out_root / "index.json").write_text(json.dumps(index, indent=2, ensure_ascii=False))
+        (out_root / "index.json").write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"{len(results)} of {len(urls)} sites scraped → {out_root / 'index.json'}")
     if failures:
         print("failed:\n" + "\n".join(f"  {u}: {e[:200]}" for u, e in failures))

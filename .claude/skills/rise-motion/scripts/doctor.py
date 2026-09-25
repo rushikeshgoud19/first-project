@@ -103,7 +103,7 @@ def main():
         problems += 1
     else:
         try:
-            ver = subprocess.run([ff, "-hide_banner", "-version"], capture_output=True, text=True,
+            ver = subprocess.run([ff, "-hide_banner", "-version"], capture_output=True, encoding="utf-8", errors="replace",
                                  timeout=30).stdout.split("\n")[0]
         except Exception:
             ver = "ffmpeg"

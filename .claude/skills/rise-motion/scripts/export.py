@@ -53,12 +53,12 @@ async (seconds) => {
 
 
 def has_audio(ffmpeg: str, path: Path) -> bool:
-    r = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True)
+    r = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, encoding="utf-8", errors="replace")
     return re.search(r"Stream #\S+.*Audio:", r.stderr) is not None
 
 
 def probe_duration(ffmpeg: str, path: Path) -> float | None:
-    r = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True)
+    r = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, encoding="utf-8", errors="replace")
     m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", r.stderr)
     return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else None
 

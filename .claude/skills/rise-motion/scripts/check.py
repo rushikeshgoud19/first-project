@@ -618,9 +618,9 @@ async def main_async(args):
         md += [f"- {icon[i['level']]} {i['check']}: {i['detail']}" for i in rows]
         md.append("")
     md.append(BY_EYE)
-    (out_dir / "report.md").write_text("\n".join(md))
+    (out_dir / "report.md").write_text("\n".join(md), encoding="utf-8")
     (out_dir / "report.json").write_text(json.dumps({"verdict": verdict, "file": str(html), "formats": sizes,
-                                                     "duration": info["DURATION"], "items": report.items}, indent=2))
+                                                     "duration": info["DURATION"], "items": report.items}, indent=2), encoding="utf-8")
 
     print(summary)
     for fmt in groups:

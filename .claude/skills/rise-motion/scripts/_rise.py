@@ -30,6 +30,10 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+# The scripts print ✔ ⚠ ✘ → Δ; Windows pipes default to cp1252, which cannot encode them.
+for _stream in (sys.stdout, sys.stderr):
+    _stream.reconfigure(encoding="utf-8", errors="replace")
+
 SKILL_DIR = Path(__file__).resolve().parent.parent
 FORMAT_SIZES = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080), "4:5": (1080, 1350)}
 
@@ -191,6 +195,14 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
 
     def log_message(self, *args):
         pass
+
+    def do_GET(self):
+        # Full Chrome (Windows, macOS) asks for /favicon.ico; a 404 would show up as a console error.
+        if self.path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+            return
+        super().do_GET()
 
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
@@ -385,7 +397,7 @@ def build_overrides(brand=None, theme=None, params=None):
         if p.is_dir():
             p = p / "brand.json"
         try:
-            data = json.loads(p.read_text())
+            data = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as e:
             raise RiseError(f"could not read brand file {p}: {e}")
         o["theme"] = {k: v for k, v in (data.get("theme") or {}).items() if v not in (None, "")}
@@ -417,7 +429,7 @@ def run(coro):
 
 def ffmpeg_has(exe: str, encoder: str) -> bool:
     try:
-        out = subprocess.run([exe, "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=30).stdout
+        out = subprocess.run([exe, "-hide_banner", "-encoders"], capture_output=True, encoding="utf-8", errors="replace", timeout=30).stdout
         return re.search(rf"\b{re.escape(encoder)}\b", out) is not None
     except Exception:
         return False

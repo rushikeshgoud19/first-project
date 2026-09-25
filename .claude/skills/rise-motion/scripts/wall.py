@@ -22,7 +22,7 @@ import _rise  # noqa: E402
 
 
 def duration(ffmpeg, path):
-    r = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True)
+    r = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, encoding="utf-8", errors="replace")
     m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", r.stderr)
     return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else None
 
@@ -90,7 +90,7 @@ def main():
             "-c:v", "libx264", "-preset", "medium", "-crf", str(args.crf), "-pix_fmt", "yuv420p",
             "-t", f"{seconds:.3f}", "-movflags", "+faststart", str(args.out)]
     t0 = time.time()
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
         sys.exit(f"error: ffmpeg failed: {r.stderr[-800:]}")
     out = Path(args.out)
