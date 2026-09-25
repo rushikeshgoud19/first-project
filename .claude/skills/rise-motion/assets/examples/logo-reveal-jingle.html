@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Logo reveal with a jingle</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- One stylesheet for every family render() uses. display=block avoids a fallback flash. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=Newsreader:opsz,wght@6..72,500&display=block">
+<style>
+  :root { --chrome: #0c0c0d; --line: #2a2a2e; --text: #d9d6cf; --muted: #8d8a84; --hi: #f2efe8; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--chrome); color: var(--text);
+               font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: grid; grid-template-rows: minmax(0, 1fr) auto; }
+  #stage { position: relative; overflow: hidden; }
+  #stage > * { position: absolute; }
+  #view { box-shadow: 0 18px 60px rgba(0, 0, 0, .55); }
+  #under { object-fit: cover; }
+  #bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 16px;
+         border-top: 1px solid var(--line); }
+  #bar button { background: #1b1b1e; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+                padding: 5px 10px; font: inherit; cursor: pointer; }
+  #bar button:hover { color: var(--hi); border-color: #3b3b40; }
+  #bar button[aria-pressed="true"] { background: var(--hi); color: #111; border-color: var(--hi); }
+  #scrub { flex: 1 1 160px; min-width: 120px; accent-color: var(--hi); }
+  #time { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 92px; }
+  #formats { display: flex; gap: 6px; }
+  body.capture { display: block; background: transparent; }
+  body.capture #bar, body.capture #stage { display: none; }
+</style>
+</head>
+<body>
+<main id="stage"><canvas id="view"></canvas></main>
+<nav id="bar" aria-label="Player">
+  <button id="play" aria-label="Play or pause (space)">Pause</button>
+  <input id="scrub" type="range" min="0" max="1000" value="0" aria-label="Time">
+  <span id="time">0.00 / 0.00s</span>
+  <span id="formats"></span>
+  <button id="sound" hidden aria-label="Toggle sound">Sound off</button>
+</nav>
+<script>
+/* ─────────────────────────────────────────────────────────────────────────────
+   RISE brief (keep in sync with brief.md)
+   EXAMPLE (recipe 5). Needs the brand's real logo next to this file: run
+      python <skill>/scripts/brand_scrape.py https://site.com --out brand   and set PARAMS.logo.
+   R  The real logo.svg (a mark + wordmark lockup) and brand colours from brand.json.
+   I  5 s. The mark bursts in big at the centre and flies into its place in the lockup while the
+      wordmark traces itself and fills; a chord lands with the mark at 1.6 s; hold; it folds away.
+   S  The exact logo on textured paper, calm, one overshoot; a jingle in code, muted by default. 1:1.
+   E  Examine: python <skill>/scripts/check.py <this file>
+   ───────────────────────────────────────────────────────────────────────────── */
+
+// ── 1 · Settings ────────────────────────────────────────────────────────────
+const O = window.RISE_OVERRIDES || {};             // export.py --brand / --theme / --param land here
+const DURATION = 5;                                 // seconds per loop; frame(0) must equal frame(DURATION)
+const FPS = 30;                                     // grain refresh, stepped motion and export default
+const FORMATS = ['1:1'];            // formats this piece is designed for; check.py renders each
+const SIZES = { '16:9': [1920, 1080], '9:16': [1080, 1920], '1:1': [1080, 1080], '4:5': [1080, 1350] };
+const PARAMS = { logo: 'brand/logo.svg', ...O.params };   // path to the scraped logo.svg   // user-editable knobs live here
+const THEME = { bg: '#f6f3ec', ink: '#141413', accent: '#d97757', accent2: '#5b8def',
+                font: 'Newsreader', fontBody: 'Inter', ...O.theme };
+const BRAND = { name: '', logo: null, ...O.brand };  // logo: path or data URL of the REAL file, never redrawn
+const ASSETS = {};                                   // extra images: { slide: 'ref/slide.png' } → IMAGES.slide
+let LOGO = null;
+const PRELOAD = [async () => { LOGO = await loadLogoParts(PARAMS.logo); }];   // async jobs finished before the first frame, e.g. async () => { LOGO = await loadLogoParts('brand/logo.svg'); }
+const FONTS = [];                                     // the logo is the real SVG: no fonts needed  // every font render() sets
+const UNDER = null;   // Level 3: { src: 'clip.mp4', rect: [0, 960, 1080, 960] } plays a clip under the canvas
+
+// ── 2 · Helpers (pure: safe to call from render) ───────────────────────────
+const TAU = Math.PI * 2;
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const seg = (t, a, b) => clamp((t - a) / (b - a));          // 0→1 progress of t through [a, b] seconds
+const ease = {
+  linear: k => k,                                            // for scrubbing only; motion should ease
+  in: k => k * k * k,
+  out: k => 1 - (1 - k) ** 3,
+  inOut: k => (k < 0.5 ? 4 * k ** 3 : 1 - (-2 * k + 2) ** 3 / 2),
+  outQuint: k => 1 - (1 - k) ** 5,
+  inOutQuint: k => (k < 0.5 ? 16 * k ** 5 : 1 - (-2 * k + 2) ** 5 / 2),
+  inOutSine: k => -(Math.cos(Math.PI * k) - 1) / 2,
+  outBack: k => { const c = 1.70158; return 1 + (c + 1) * (k - 1) ** 3 + c * (k - 1) ** 2; },
+};
+const wrap = t => ((t % DURATION) + DURATION) % DURATION;
+const phase = t => wrap(t) / DURATION;                       // 0→1 across one loop
+// Periodic motion that completes whole cycles per loop, so the seam is invisible.
+const wave = (t, cycles = 1, offset = 0) => Math.sin(TAU * (cycles * t / DURATION + offset));
+// Frame index: identical at t = 0 and t = DURATION. Drives grain and stepped ("on twos") looks.
+const frameOf = (t, fps = FPS) => Math.floor(wrap(t) * fps + 1e-6);
+const stepped = (t, fps = 12) => frameOf(t, fps) / fps;
+
+// Seeded randomness. Use these, never Math.random(), so every frame is reproducible.
+function hash(i, seed = 0) {                                 // integer i → [0, 1)
+  let x = (Math.imul(i | 0, 0x27d4eb2d) ^ Math.imul((seed | 0) + 0x9e3779b9, 0x165667b1)) | 0;
+  x = Math.imul(x ^ (x >>> 15), 0x85ebca6b);
+  x = Math.imul(x ^ (x >>> 13), 0xc2b2ae35);
+  return ((x ^ (x >>> 16)) >>> 0) / 4294967296;
+}
+const hash2 = (x, y, seed = 0) => hash(((x | 0) * 73856093) ^ ((y | 0) * 19349663), seed);
+function noise(x, y = 0, seed = 0) {                         // smooth value noise → [0, 1]
+  const xi = Math.floor(x), yi = Math.floor(y), s = k => k * k * (3 - 2 * k);
+  const u = s(x - xi), v = s(y - yi);
+  return lerp(lerp(hash2(xi, yi, seed), hash2(xi + 1, yi, seed), u),
+              lerp(hash2(xi, yi + 1, seed), hash2(xi + 1, yi + 1, seed), u), v);
+}
+function fbm(x, y = 0, seed = 0, octaves = 4) {
+  let sum = 0, amp = 0.5, f = 1, norm = 0;
+  for (let o = 0; o < octaves; o++) { sum += amp * noise(x * f, y * f, seed + o * 17); norm += amp; amp *= 0.5; f *= 2; }
+  return sum / norm;
+}
+// Noise that returns to its start each loop (walks a circle through noise space).
+function loopNoise(t, seed = 0, radius = 1.5, octaves = 3) {
+  const a = TAU * phase(t);
+  return fbm(10 + Math.cos(a) * radius, 10 + Math.sin(a) * radius, seed, octaves);
+}
+
+// Colour
+function rgb(hex) {
+  const h = hex.replace('#', ''), n = parseInt(h.length < 6 ? h.replace(/./g, c => c + c) : h.slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+const rgba = (hex, a = 1) => { const [r, g, b] = rgb(hex); return `rgba(${r},${g},${b},${a})`; };
+const mix = (a, b, k) => '#' + rgb(a).map((v, i) => Math.round(lerp(v, rgb(b)[i], k)).toString(16).padStart(2, '0')).join('');
+function luminance(hex) {
+  const [r, g, b] = rgb(hex).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+const contrast = (a, b) => { const [x, y] = [luminance(a), luminance(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+// Whichever option reads best on bg: auto contrast for light and dark brands.
+const readable = (bg, ...options) => options.reduce((best, c) => (contrast(bg, c) > contrast(bg, best) ? c : best));
+
+// Layout for any format: u = 1px at 1080 on the short side; safe = the box inside the margins.
+function stage(w, h, margin = 0.07) {
+  const u = Math.min(w, h) / 1080, m = Math.round(Math.min(w, h) * margin), aspect = w / h;
+  return { u, w, h, aspect, cx: w / 2, cy: h / 2,
+           portrait: aspect < 0.8, square: aspect >= 0.8 && aspect <= 1.25, landscape: aspect > 1.25,
+           safe: { x: m, y: m, w: w - 2 * m, h: h - 2 * m } };
+}
+
+// Cached surfaces: built once per size, deterministic, so render stays pure.
+const _cache = new Map();
+function cached(key, make) { if (!_cache.has(key)) _cache.set(key, make()); return _cache.get(key); }
+function surface(w, h) { const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h)); return c; }
+
+// A ground that is never a flat fill: base colour, soft mottling, faint fibres.
+function ground(ctx, w, h, color, { seed = 1, mottle = 0.07, fibres = 0.05 } = {}) {
+  const tex = cached(`ground:${w}x${h}:${color}:${seed}:${mottle}:${fibres}`, () => {
+    const c = surface(w, h), g = c.getContext('2d'), u = Math.min(w, h) / 1080;
+    g.fillStyle = color; g.fillRect(0, 0, w, h);
+    const nw = 96, nh = Math.max(2, Math.round(96 * h / w)), n = surface(nw, nh), ng = n.getContext('2d');
+    const img = ng.createImageData(nw, nh);
+    for (let y = 0; y < nh; y++) for (let x = 0; x < nw; x++) {
+      const v = Math.round(fbm(x / 11, y / 11, seed) * 255), i = (y * nw + x) * 4;
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255;
+    }
+    ng.putImageData(img, 0, 0);
+    g.save(); g.globalAlpha = mottle * 2; g.globalCompositeOperation = 'overlay';
+    g.imageSmoothingQuality = 'high'; g.drawImage(n, 0, 0, w, h); g.restore();
+    g.save(); g.globalAlpha = fibres; g.strokeStyle = luminance(color) > 0.35 ? '#000' : '#fff';
+    g.lineWidth = Math.max(0.6, 0.9 * u); g.lineCap = 'round';
+    for (let i = 0, count = Math.round((w * h) / 3800); i < count; i++) {
+      const x = hash(i, seed + 1) * w, y = hash(i, seed + 2) * h, len = (6 + hash(i, seed + 3) * 24) * u, a = hash(i, seed + 4) * TAU;
+      g.beginPath(); g.moveTo(x, y);
+      g.quadraticCurveTo(x + Math.cos(a + 0.7) * len * 0.5, y + Math.sin(a + 0.7) * len * 0.5, x + Math.cos(a) * len, y + Math.sin(a) * len);
+      g.stroke();
+    }
+    g.restore();
+    return c;
+  });
+  ctx.drawImage(tex, 0, 0, w, h);
+}
+
+// Grain that re-rolls fps times a second (by frame index, so it loops). Specks both lighten and
+// darken, so it shows on dark and light grounds. amount ≈ 0.05–0.15; size = grain px at 1080.
+// 2 px grain changing 15×/s reads as film and keeps MP4s small; 1 px at 30 fps triples the file size.
+function grain(ctx, w, h, t, amount = 0.08, { fps = 15, size = 2 } = {}) {
+  const px = Math.max(1, Math.round(size * Math.min(w, h) / 1080)), cells = 256;
+  const tiles = cached(`grain:${px}`, () => Array.from({ length: 6 }, (_, k) => {
+    const small = surface(cells, cells), sg = small.getContext('2d'), img = sg.createImageData(cells, cells), d = img.data;
+    for (let i = 0; i < cells * cells; i++) {
+      const v = hash(i, 101 + k), a = Math.abs(v - 0.5) * 2;
+      d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v > 0.5 ? 255 : 0; d[i * 4 + 3] = Math.round(a * a * 255);
+    }
+    sg.putImageData(img, 0, 0);
+    const c = surface(cells * px, cells * px), g = c.getContext('2d');
+    g.imageSmoothingEnabled = false; g.drawImage(small, 0, 0, cells * px, cells * px);
+    return c;
+  }));
+  const f = frameOf(t, fps), span = cells * px, pat = ctx.createPattern(tiles[f % tiles.length], 'repeat');
+  pat.setTransform(new DOMMatrix([1, 0, 0, 1, -Math.floor(hash(f, 7) * cells) * px, -Math.floor(hash(f, 8) * cells) * px]));
+  ctx.save(); ctx.globalAlpha = amount; ctx.fillStyle = pat; ctx.fillRect(0, 0, w, h); ctx.restore();
+}
+
+// Light falling across the frame. angle in degrees: 90 = light from the top.
+function falloff(ctx, w, h, angle = 110, strength = 0.14) {
+  const a = (angle * Math.PI) / 180, r = Math.hypot(w, h) / 2, dx = Math.cos(a) * r, dy = Math.sin(a) * r;
+  const g = ctx.createLinearGradient(w / 2 - dx, h / 2 - dy, w / 2 + dx, h / 2 + dy);
+  g.addColorStop(0, `rgba(255,255,255,${strength})`); g.addColorStop(0.55, 'rgba(255,255,255,0)');
+  g.addColorStop(1, `rgba(0,0,0,${strength * 0.9})`);
+  ctx.save(); ctx.fillStyle = g; ctx.fillRect(0, 0, w, h); ctx.restore();
+}
+function vignette(ctx, w, h, strength = 0.3, cx = 0.5, cy = 0.46) {
+  const r = Math.hypot(w, h) * 0.62, g = ctx.createRadialGradient(w * cx, h * cy, r * 0.28, w * cx, h * cy, r);
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, `rgba(0,0,0,${strength})`);
+  ctx.save(); ctx.fillStyle = g; ctx.fillRect(0, 0, w, h); ctx.restore();
+}
+
+// Type
+const fontOf = (weight, px, family, style = '') => `${style} ${weight} ${px}px "${family}"`.trim();
+function fitSize(ctx, text, maxWidth, maxPx, weight, family, minPx = 8) {  // largest size ≤ maxPx that fits
+  ctx.save(); ctx.font = fontOf(weight, 100, family); const w100 = ctx.measureText(text).width; ctx.restore();
+  return clamp((maxWidth / Math.max(1, w100)) * 100, minPx, maxPx);
+}
+// Break text into lines that fit, never leaving one word alone on the last line.
+function lines(ctx, text, maxWidth) {
+  const out = [];
+  let cur = '';
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const next = cur ? cur + ' ' + word : word;
+    if (cur && ctx.measureText(next).width > maxWidth) { out.push(cur); cur = word; } else cur = next;
+  }
+  if (cur) out.push(cur);
+  const n = out.length;
+  if (n > 1 && !out[n - 1].includes(' ')) {
+    const prev = out[n - 2].split(' ');
+    if (prev.length > 1) {
+      const last = prev.pop() + ' ' + out[n - 1];
+      if (ctx.measureText(last).width <= maxWidth) { out[n - 2] = prev.join(' '); out[n - 1] = last; }
+    }
+  }
+  return out;
+}
+
+// Images (the real files: logos, screenshots, references)
+const IMAGES = {};
+function loadImage(src) {
+  return new Promise((ok, no) => {
+    const im = new Image();
+    if (CAPTURE) im.crossOrigin = 'anonymous';   // scripts need an untainted canvas
+    im.onload = () => ok(im); im.onerror = () => no(new Error('could not load image ' + String(src).slice(0, 96)));
+    im.src = src;
+  });
+}
+function drawContain(ctx, img, x, y, w, h) {  // fit inside the box, centred, aspect kept
+  const s = Math.min(w / img.width, h / img.height), dw = img.width * s, dh = img.height * s;
+  ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+  return { x: x + (w - dw) / 2, y: y + (h - dh) / 2, w: dw, h: dh };
+}
+
+/* ── Animate a REAL logo from its SVG (Level 5) ────────────────────────────
+   Paste into the helpers section. Never redraw a logo from memory: load the file the
+   brand scraper saved (brand/logo.svg) or the one the user gave you.
+
+     let LOGO = null;
+     const PRELOAD = [async () => { LOGO = await loadLogoParts('brand/logo.svg'); }];
+   Then in render():
+     drawLogo(ctx, LOGO, x, y, w, h, (i, part) => ({
+       alpha: 1,        // 0–1
+       dx: 0, dy: 0,    // offset in canvas px
+       scale: 1,        // around the part's own centre
+       draw: 1,         // < 1 strokes the outline on progressively (draw-on), 1 = filled
+     }));
+   Parts come in document order; LOGO.parts[i].box is the part's box in logo units, so you can
+   stagger by position (left to right: sort indices by box.x). If a brand's file is a PNG only,
+   animate the image as a whole (mask wipes, scale, blur) instead of splitting it. */
+
+function svgPathData(el) {
+  const n = k => parseFloat(el.getAttribute(k)) || 0;
+  switch (el.tagName.toLowerCase()) {
+    case 'path': return el.getAttribute('d');
+    case 'rect': {
+      const x = n('x'), y = n('y'), w = n('width'), h = n('height');
+      let rx = n('rx') || n('ry'), ry = n('ry') || n('rx');
+      if (!rx) return `M${x} ${y}h${w}v${h}h${-w}Z`;
+      rx = Math.min(rx, w / 2); ry = Math.min(ry, h / 2);
+      return `M${x + rx} ${y}h${w - 2 * rx}a${rx} ${ry} 0 0 1 ${rx} ${ry}v${h - 2 * ry}a${rx} ${ry} 0 0 1 ${-rx} ${ry}` +
+             `h${2 * rx - w}a${rx} ${ry} 0 0 1 ${-rx} ${-ry}v${2 * ry - h}a${rx} ${ry} 0 0 1 ${rx} ${-ry}Z`;
+    }
+    case 'circle': { const cx = n('cx'), cy = n('cy'), r = n('r'); return `M${cx - r} ${cy}a${r} ${r} 0 1 0 ${2 * r} 0a${r} ${r} 0 1 0 ${-2 * r} 0Z`; }
+    case 'ellipse': { const cx = n('cx'), cy = n('cy'), rx = n('rx'), ry = n('ry'); return `M${cx - rx} ${cy}a${rx} ${ry} 0 1 0 ${2 * rx} 0a${rx} ${ry} 0 1 0 ${-2 * rx} 0Z`; }
+    case 'polygon': case 'polyline': {
+      const p = (el.getAttribute('points') || '').trim().split(/[\s,]+/).map(Number);
+      if (p.length < 4) return null;
+      let d = `M${p[0]} ${p[1]}`;
+      for (let i = 2; i + 1 < p.length; i += 2) d += `L${p[i]} ${p[i + 1]}`;
+      return el.tagName.toLowerCase() === 'polygon' ? d + 'Z' : d;
+    }
+    case 'line': return `M${n('x1')} ${n('y1')}L${n('x2')} ${n('y2')}`;
+  }
+  return null;
+}
+
+async function loadLogoParts(src) {
+  const text = await (await fetch(src)).text();
+  const host = document.createElement('div');
+  // Off-screen and transparent, not visibility:hidden: children would inherit it and be skipped below.
+  host.style.cssText = 'position:absolute;left:-99999px;top:0;opacity:0;pointer-events:none';
+  host.innerHTML = text;
+  document.body.appendChild(host);
+  const svg = host.querySelector('svg');
+  if (!svg) { host.remove(); throw new Error('no <svg> in ' + src); }
+  const vbb = svg.viewBox && svg.viewBox.baseVal;
+  const bb = svg.getBBox();
+  const viewBox = vbb && vbb.width ? [vbb.x, vbb.y, vbb.width, vbb.height] : [bb.x, bb.y, bb.width, bb.height];
+  const rootInv = svg.getScreenCTM().inverse();
+  const parts = [];
+  for (const el of svg.querySelectorAll('path, rect, circle, ellipse, polygon, polyline, line')) {
+    if (el.closest('defs, clipPath, mask, symbol, pattern, marker')) continue;
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+    const d = svgPathData(el);
+    if (!d) continue;
+    const m = rootInv.multiply(el.getScreenCTM());               // element → logo units
+    let fill = cs.fill;
+    if (fill.startsWith('url(')) {                                 // gradients: use the first stop's colour
+      const id = (fill.match(/#([^")]+)/) || [])[1], stop = id && svg.querySelector('#' + CSS.escape(id) + ' stop');
+      fill = stop ? getComputedStyle(stop).stopColor : '#000000';
+    }
+    const b = el.getBBox(), pts = [[b.x, b.y], [b.x + b.width, b.y], [b.x, b.y + b.height], [b.x + b.width, b.y + b.height]]
+      .map(([x, y]) => [m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f]);
+    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+    parts.push({
+      d, path: new Path2D(d), m: [m.a, m.b, m.c, m.d, m.e, m.f],
+      fill: fill === 'none' ? null : fill, rule: cs.fillRule === 'evenodd' ? 'evenodd' : 'nonzero',
+      stroke: cs.stroke === 'none' ? null : cs.stroke, strokeWidth: parseFloat(cs.strokeWidth) || 0,
+      opacity: (+cs.opacity || 1) * (+cs.fillOpacity || 1),
+      length: el.getTotalLength ? el.getTotalLength() : 0,
+      box: { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) },
+    });
+  }
+  host.remove();
+  return { parts, viewBox, aspect: viewBox[2] / viewBox[3] };
+}
+
+function drawLogo(ctx, logo, x, y, w, h, style = () => ({})) {
+  if (!logo) return;
+  const [vx, vy, vw, vh] = logo.viewBox, s = Math.min(w / vw, h / vh);
+  const ox = x + (w - vw * s) / 2 - vx * s, oy = y + (h - vh * s) / 2 - vy * s;
+  logo.parts.forEach((p, i) => {
+    const st = { alpha: 1, dx: 0, dy: 0, scale: 1, draw: 1, ...style(i, p) };
+    if (st.alpha <= 0.001) return;
+    ctx.save();
+    ctx.globalAlpha *= clamp(st.alpha) * p.opacity;
+    const cx = ox + (p.box.x + p.box.w / 2) * s, cy = oy + (p.box.y + p.box.h / 2) * s;
+    ctx.translate(cx + st.dx, cy + st.dy); ctx.scale(st.scale, st.scale); ctx.translate(-cx, -cy);
+    ctx.translate(ox, oy); ctx.scale(s, s); ctx.transform(...p.m);
+    if (st.draw < 1) {
+      ctx.lineWidth = Math.max(p.strokeWidth, 2 / s); ctx.lineJoin = 'round';
+      ctx.strokeStyle = p.fill || p.stroke || '#000';
+      ctx.setLineDash([p.length, p.length]); ctx.lineDashOffset = p.length * (1 - clamp(st.draw));
+      ctx.stroke(p.path);
+    } else {
+      if (p.fill) { ctx.fillStyle = p.fill; ctx.fill(p.path, p.rule); }
+      if (p.stroke && p.strokeWidth) { ctx.strokeStyle = p.stroke; ctx.lineWidth = p.strokeWidth; ctx.stroke(p.path); }
+    }
+    ctx.restore();
+  });
+}
+
+/* ── Sound written in code (Level 5 jingles) ───────────────────────────────
+   Paste into the helpers section and replace `const score = null;` with a score.
+   score(ac, when, out) schedules ONE loop of audio starting at audio time `when`
+   (seconds). Put every event at the same t where render() shows it, so sound and
+   picture stay locked. The player starts muted (a Sound button appears); export.py
+   renders the score offline and muxes it into the MP4. Deterministic: noise uses
+   hash(), never Math.random. Keep peaks under 1.0 (export.py warns if they clip). */
+
+const note = name => {                                   // 'A4' → 440 Hz, 'C#5', 'Eb3' …
+  const m = /^([A-G])(#|b)?(-?\d)$/.exec(name);
+  const semis = { C: -9, D: -7, E: -5, F: -4, G: -2, A: 0, B: 2 }[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0) + (m[3] - 4) * 12;
+  return 440 * 2 ** (semis / 12);
+};
+
+// One enveloped oscillator note. type: sine | triangle | square | sawtooth.
+function tone(ac, out, { at, f, dur = 0.25, type = 'sine', gain = 0.2, attack = 0.006, release = 0.18, glideTo = null, pan = 0 }) {
+  const o = ac.createOscillator(), g = ac.createGain(), p = ac.createStereoPanner();
+  o.type = type;
+  o.frequency.setValueAtTime(f, at);
+  if (glideTo) o.frequency.exponentialRampToValueAtTime(glideTo, at + dur);
+  g.gain.setValueAtTime(0, at);
+  g.gain.linearRampToValueAtTime(gain, at + attack);
+  g.gain.setTargetAtTime(0, at + Math.max(attack, dur - release), release / 3);
+  p.pan.value = pan;
+  o.connect(g).connect(p).connect(out);
+  o.start(at); o.stop(at + dur + release * 3);
+}
+
+// A filtered noise burst: hats, swooshes, paper hits. type: highpass | bandpass | lowpass.
+function noiseHit(ac, out, { at, dur = 0.12, gain = 0.2, freq = 3000, type = 'bandpass', seed = 7 }) {
+  const n = Math.ceil(ac.sampleRate * dur), buf = ac.createBuffer(1, n, ac.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (hash(i, seed) * 2 - 1) * (1 - i / n) ** 2;
+  const src = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+  src.buffer = buf; f.type = type; f.frequency.value = freq; g.gain.value = gain;
+  src.connect(f).connect(g).connect(out); src.start(at);
+}
+
+// A soft kick: a sine that drops in pitch.
+function kick(ac, out, { at, gain = 0.5 }) {
+  tone(ac, out, { at, f: 140, glideTo: 45, dur: 0.22, gain, attack: 0.002, release: 0.12 });
+}
+
+// Example: a 3-second jingle locked to a logo reveal that lands at 1.2 s.
+// Rising pair while the mark assembles, a bright chord on the land, a shimmer as it settles.
+const score = (ac, when, out) => {
+  const bus = ac.createGain(); bus.gain.value = 0.9; bus.connect(out);
+  tone(ac, bus, { at: when + 0.25, f: note('C5'), dur: 0.5, type: 'sine', gain: 0.07, glideTo: note('G5') });   // the burst
+  tone(ac, bus, { at: when + 1.0, f: note('E5'), dur: 0.16, gain: 0.16, pan: -0.3 });
+  tone(ac, bus, { at: when + 1.25, f: note('G5'), dur: 0.16, gain: 0.16, pan: 0.3 });
+  kick(ac, bus, { at: when + 1.6, gain: 0.45 });                                                                  // spark lands
+  for (const [n, p] of [['C5', -0.2], ['E5', 0], ['G5', 0.2], ['C6', 0]]) tone(ac, bus, { at: when + 1.6, f: note(n), type: 'triangle', dur: 0.9, gain: 0.08, release: 0.5, pan: p });
+  noiseHit(ac, bus, { at: when + 1.6, dur: 0.3, gain: 0.05, freq: 7000, type: 'highpass' });
+  tone(ac, bus, { at: when + 2.4, f: note('C7'), dur: 0.5, gain: 0.03, release: 0.4 });                          // shimmer as it settles
+};
+
+// ── 3 · The one function ───────────────────────────────────────────────────
+const POSTER = 2.8;                                  // frame 0 = the full logo, mid-hold
+
+function render(ctx, time, theme, w, h) {
+  const t = wrap(time + POSTER);
+  const S = stage(w, h), u = S.u;
+  ground(ctx, w, h, theme.bg, { seed: 4, mottle: 0.06, fibres: 0.04 });
+  falloff(ctx, w, h, 120, 0.08);
+  if (!LOGO) return;
+
+  // The real lockup, fitted to the safe width and centred. Never rearranged.
+  const lw = S.safe.w * 0.92, lh = lw / LOGO.aspect, lx = S.cx - lw / 2, ly = S.cy - lh / 2;
+  const [vx, vy, vw, vh] = LOGO.viewBox, fit = Math.min(lw / vw, lh / vh);
+  const ox = lx + (lw - vw * fit) / 2 - vx * fit, oy = ly + (lh - vh * fit) / 2 - vy * fit;
+  // The mark is the leftmost part of the lockup (adjust for logos laid out differently).
+  const spark = LOGO.parts.reduce((a, p, i) => (p.box.x < LOGO.parts[a].box.x ? i : a), 0);
+  const sb = LOGO.parts[spark].box, scx = ox + (sb.x + sb.w / 2) * fit, scy = oy + (sb.y + sb.h / 2) * fit;
+  const big = (Math.min(w, h) * 0.62) / (sb.h * fit);            // hero size: the spark fills ~62% of the frame
+
+  // Timeline (s): spark bursts in big at the centre 0.2–0.9 · flies into its place 0.9–1.6 while the
+  // wordmark traces 1.0–1.8 and fills 1.7–2.1 · chord lands 1.6 · breathing hold · folds 3.8–4.6.
+  const burst = ease.outBack(seg(t, 0.2, 0.9));
+  const fly = ease.inOut(seg(t, 0.9, 1.6));
+  const trace = ease.inOut(seg(t, 1.0, 1.8));
+  const fill = ease.out(seg(t, 1.7, 2.1));
+  const foldWord = ease.inOut(seg(t, 3.8, 4.25));
+  const foldSpark = ease.inOut(seg(t, 4.05, 4.6));
+  const breathe = seg(t, 1.6, 1.9) * (1 - seg(t, 3.7, 3.9)) * wave(t, 1, 0.1);
+
+  drawLogo(ctx, LOGO, lx, ly, lw, lh, (i) => {
+    if (i === spark) {
+      const scale = lerp(big * burst, 1, fly) * (1 - foldSpark) + 0.03 * breathe;
+      return { alpha: clamp(burst * 4) * (1 - foldSpark), scale: Math.max(0.001, scale),
+               dx: (S.cx - scx) * (1 - fly), dy: (S.cy - scy) * (1 - fly) };
+    }
+    if (fill >= 1) return { alpha: 1 - foldWord, dx: -foldWord * 40 * u };
+    return trace > 0 ? { draw: Math.min(0.999, trace), alpha: 1 - foldWord } : { alpha: 0 };
+  });
+  if (fill > 0 && fill < 1) drawLogo(ctx, LOGO, lx, ly, lw, lh, (i) => (i === spark ? { alpha: 0 } : { alpha: fill }));
+
+  vignette(ctx, w, h, 0.14);
+  grain(ctx, w, h, t, 0.07);
+}
+
+// ── 4 · Harness: player + the window.RISE contract the scripts use. Leave as is. ──
+const CAPTURE = new URLSearchParams(location.search).has('capture');
+if (CAPTURE) document.body.classList.add('capture');
+const ready = (async () => {
+  await Promise.all(FONTS.map(f => document.fonts.load(f).catch(() => null)));
+  const wanted = { ...ASSETS, ...(BRAND.logo ? { logo: BRAND.logo } : {}) };
+  await Promise.all(Object.entries(wanted).map(([k, src]) =>
+    loadImage(src).then(im => { IMAGES[k] = im; }).catch(e => console.error(e.message))));
+  for (const job of PRELOAD) await job();
+})();
+window.RISE = { version: 1, render, score, ready, DURATION, FPS, FORMATS, SIZES, THEME, PARAMS, BRAND, FONTS, UNDER };
+
+if (!CAPTURE) (async () => {
+  await ready;
+  const q = new URLSearchParams(location.search), $ = id => document.getElementById(id);
+  const view = $('view'), ctx = view.getContext('2d'), stageEl = $('stage');
+  let fmt = FORMATS.includes(q.get('format')) ? q.get('format') : FORMATS[0];
+  let playing = !q.has('t'), t = q.has('t') ? clamp(+q.get('t') || 0, 0, DURATION) : 0, last = performance.now();
+  let under = null;
+  if (UNDER) { under = document.createElement('video'); under.id = 'under'; under.src = UNDER.src; under.muted = true; under.playsInline = true; under.loop = true; stageEl.prepend(under); }
+
+  function layout() {
+    const [w, h] = SIZES[fmt] || [1920, 1080];
+    if (view.width !== w || view.height !== h) { view.width = w; view.height = h; }
+    const W = stageEl.clientWidth - 32, H = stageEl.clientHeight - 32, s = Math.min(W / w, H / h);
+    const left = (stageEl.clientWidth - w * s) / 2, top = (stageEl.clientHeight - h * s) / 2;
+    Object.assign(view.style, { width: w * s + 'px', height: h * s + 'px', left: left + 'px', top: top + 'px' });
+    if (under) {
+      const [rx, ry, rw, rh] = UNDER.rect || [0, 0, w, h];
+      Object.assign(under.style, { left: left + rx * s + 'px', top: top + ry * s + 'px', width: rw * s + 'px', height: rh * s + 'px' });
+    }
+  }
+  const fmtBox = $('formats');
+  for (const f of FORMATS) {
+    const b = document.createElement('button'); b.textContent = f; b.dataset.f = f;
+    b.onclick = () => { fmt = f; syncButtons(); layout(); };
+    fmtBox.append(b);
+  }
+  const syncButtons = () => fmtBox.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.f === fmt)));
+  syncButtons(); layout(); addEventListener('resize', layout);
+
+  const playBtn = $('play'), scrub = $('scrub'), timeEl = $('time');
+  const setPlaying = p => { playing = p; playBtn.textContent = p ? 'Pause' : 'Play'; if (under) p ? under.play().catch(() => {}) : under.pause(); };
+  playBtn.onclick = () => setPlaying(!playing);
+  scrub.oninput = () => { setPlaying(false); t = (scrub.value / 1000) * DURATION; };
+  addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' && e.key !== ' ') return;
+    if (e.key === ' ') { e.preventDefault(); setPlaying(!playing); }
+    else if (e.key === 'ArrowRight') { setPlaying(false); t = wrap(t + 1 / FPS); }
+    else if (e.key === 'ArrowLeft') { setPlaying(false); t = wrap(t - 1 / FPS); }
+    else if (/^[1-9]$/.test(e.key) && FORMATS[+e.key - 1]) { fmt = FORMATS[+e.key - 1]; syncButtons(); layout(); }
+  });
+  setPlaying(playing);
+
+  // Sound starts muted; when on, each loop's score is scheduled just before the loop begins.
+  const soundBtn = $('sound');
+  let actx = null, out = null, soundOn = false, scheduledFor = -1, loopCount = 0;
+  if (typeof score === 'function') {
+    soundBtn.hidden = false;
+    soundBtn.onclick = async () => {
+      if (!actx) { actx = new AudioContext(); out = actx.createGain(); out.connect(actx.destination); }
+      soundOn = !soundOn; await actx.resume(); out.gain.value = soundOn ? 1 : 0; scheduledFor = -1;
+      soundBtn.textContent = soundOn ? 'Sound on' : 'Sound off'; soundBtn.setAttribute('aria-pressed', String(soundOn));
+    };
+  }
+
+  function frame(now) {
+    const prev = t;
+    if (playing) t = (t + Math.min(0.1, (now - last) / 1000)) % DURATION;
+    last = now;
+    if (t < prev && playing) loopCount++;
+    if (soundOn && playing && DURATION - t < 0.3 && scheduledFor !== loopCount + 1) {
+      scheduledFor = loopCount + 1; score(actx, actx.currentTime + (DURATION - t), out);
+    }
+    if (under && playing && Math.abs(under.currentTime - (t % (under.duration || DURATION))) > 0.12) under.currentTime = t % (under.duration || DURATION);
+    if (under && !playing) under.currentTime = t % (under.duration || DURATION);
+    if (ctx.reset) ctx.reset(); else ctx.clearRect(0, 0, view.width, view.height);
+    ctx.save(); render(ctx, t, THEME, view.width, view.height); ctx.restore();
+    scrub.value = Math.round((t / DURATION) * 1000);
+    timeEl.textContent = `${t.toFixed(2)} / ${DURATION.toFixed(2)}s`;
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

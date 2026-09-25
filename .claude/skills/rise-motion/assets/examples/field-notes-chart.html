@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Numbers that move</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- One stylesheet for every family render() uses. display=block avoids a fallback flash. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600&family=Newsreader:opsz,wght@6..72,500&display=block">
+<style>
+  :root { --chrome: #0c0c0d; --line: #2a2a2e; --text: #d9d6cf; --muted: #8d8a84; --hi: #f2efe8; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--chrome); color: var(--text);
+               font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: grid; grid-template-rows: minmax(0, 1fr) auto; }
+  #stage { position: relative; overflow: hidden; }
+  #stage > * { position: absolute; }
+  #view { box-shadow: 0 18px 60px rgba(0, 0, 0, .55); }
+  #under { object-fit: cover; }
+  #bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 16px;
+         border-top: 1px solid var(--line); }
+  #bar button { background: #1b1b1e; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+                padding: 5px 10px; font: inherit; cursor: pointer; }
+  #bar button:hover { color: var(--hi); border-color: #3b3b40; }
+  #bar button[aria-pressed="true"] { background: var(--hi); color: #111; border-color: var(--hi); }
+  #scrub { flex: 1 1 160px; min-width: 120px; accent-color: var(--hi); }
+  #time { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 92px; }
+  #formats { display: flex; gap: 6px; }
+  body.capture { display: block; background: transparent; }
+  body.capture #bar, body.capture #stage { display: none; }
+</style>
+</head>
+<body>
+<main id="stage"><canvas id="view"></canvas></main>
+<nav id="bar" aria-label="Player">
+  <button id="play" aria-label="Play or pause (space)">Pause</button>
+  <input id="scrub" type="range" min="0" max="1000" value="0" aria-label="Time">
+  <span id="time">0.00 / 0.00s</span>
+  <span id="formats"></span>
+  <button id="sound" hidden aria-label="Toggle sound">Sound off</button>
+</nav>
+<script>
+/* ─────────────────────────────────────────────────────────────────────────────
+   RISE brief (keep in sync with brief.md)
+   R  The user's numbers 12, 19, 27, 41 (last = this quarter); title "Numbers that move".
+   I  5 s. A clay beam sweeps the ivory slide and each bar rises as it passes · an ink trend line
+      draws through the tops, a clay nib lands on this quarter · bars settle back; last = first.
+   S  Field Notes: night + dawn rim, ivory paper slide, ink bars, one clay bar, ochre scrap with a
+      compass, Newsreader title. Slow, eased; beam first. 16:9 and 9:16.
+   E  Examine: python <skill>/scripts/check.py <this file>
+   ───────────────────────────────────────────────────────────────────────────── */
+
+// ── 1 · Settings ────────────────────────────────────────────────────────────
+const O = window.RISE_OVERRIDES || {};             // export.py --brand / --theme / --param land here
+const DURATION = 5;                                 // seconds per loop; frame(0) must equal frame(DURATION)
+const FPS = 30;                                     // grain refresh, stepped motion and export default
+const FORMATS = ['16:9', '9:16'];                  // formats this piece is designed for; check.py renders each
+const SIZES = { '16:9': [1920, 1080], '9:16': [1080, 1920], '1:1': [1080, 1080], '4:5': [1080, 1350] };
+const PARAMS = { title: 'Numbers that move', values: [12, 19, 27, 41], note: 'this quarter', ...O.params };
+const THEME = { bg: '#07080c', ink: '#12141b', accent: '#d97757', accent2: '#e3b23c', paper: '#f3eee3',
+                font: 'Newsreader', fontBody: 'Inter', ...O.theme };
+const BRAND = { name: '', logo: null, ...O.brand };  // logo: path or data URL of the REAL file, never redrawn
+const ASSETS = {};                                   // extra images: { slide: 'ref/slide.png' } → IMAGES.slide
+const PRELOAD = [];   // async jobs finished before the first frame, e.g. async () => { LOGO = await loadLogoParts('brand/logo.svg'); }
+const FONTS = [`500 96px "${THEME.font}"`, `500 32px "${THEME.fontBody}"`, `600 32px "${THEME.fontBody}"`];  // every font render() sets
+const UNDER = null;   // Level 3: { src: 'clip.mp4', rect: [0, 960, 1080, 960] } plays a clip under the canvas
+
+// ── 2 · Helpers (pure: safe to call from render) ───────────────────────────
+const TAU = Math.PI * 2;
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const seg = (t, a, b) => clamp((t - a) / (b - a));          // 0→1 progress of t through [a, b] seconds
+const ease = {
+  linear: k => k,                                            // for scrubbing only; motion should ease
+  in: k => k * k * k,
+  out: k => 1 - (1 - k) ** 3,
+  inOut: k => (k < 0.5 ? 4 * k ** 3 : 1 - (-2 * k + 2) ** 3 / 2),
+  outQuint: k => 1 - (1 - k) ** 5,
+  inOutQuint: k => (k < 0.5 ? 16 * k ** 5 : 1 - (-2 * k + 2) ** 5 / 2),
+  inOutSine: k => -(Math.cos(Math.PI * k) - 1) / 2,
+  outBack: k => { const c = 1.70158; return 1 + (c + 1) * (k - 1) ** 3 + c * (k - 1) ** 2; },
+};
+const wrap = t => ((t % DURATION) + DURATION) % DURATION;
+const phase = t => wrap(t) / DURATION;                       // 0→1 across one loop
+// Periodic motion that completes whole cycles per loop, so the seam is invisible.
+const wave = (t, cycles = 1, offset = 0) => Math.sin(TAU * (cycles * t / DURATION + offset));
+// Frame index: identical at t = 0 and t = DURATION. Drives grain and stepped ("on twos") looks.
+const frameOf = (t, fps = FPS) => Math.floor(wrap(t) * fps + 1e-6);
+const stepped = (t, fps = 12) => frameOf(t, fps) / fps;
+
+// Seeded randomness. Use these, never Math.random(), so every frame is reproducible.
+function hash(i, seed = 0) {                                 // integer i → [0, 1)
+  let x = (Math.imul(i | 0, 0x27d4eb2d) ^ Math.imul((seed | 0) + 0x9e3779b9, 0x165667b1)) | 0;
+  x = Math.imul(x ^ (x >>> 15), 0x85ebca6b);
+  x = Math.imul(x ^ (x >>> 13), 0xc2b2ae35);
+  return ((x ^ (x >>> 16)) >>> 0) / 4294967296;
+}
+const hash2 = (x, y, seed = 0) => hash(((x | 0) * 73856093) ^ ((y | 0) * 19349663), seed);
+function noise(x, y = 0, seed = 0) {                         // smooth value noise → [0, 1]
+  const xi = Math.floor(x), yi = Math.floor(y), s = k => k * k * (3 - 2 * k);
+  const u = s(x - xi), v = s(y - yi);
+  return lerp(lerp(hash2(xi, yi, seed), hash2(xi + 1, yi, seed), u),
+              lerp(hash2(xi, yi + 1, seed), hash2(xi + 1, yi + 1, seed), u), v);
+}
+function fbm(x, y = 0, seed = 0, octaves = 4) {
+  let sum = 0, amp = 0.5, f = 1, norm = 0;
+  for (let o = 0; o < octaves; o++) { sum += amp * noise(x * f, y * f, seed + o * 17); norm += amp; amp *= 0.5; f *= 2; }
+  return sum / norm;
+}
+// Noise that returns to its start each loop (walks a circle through noise space).
+function loopNoise(t, seed = 0, radius = 1.5, octaves = 3) {
+  const a = TAU * phase(t);
+  return fbm(10 + Math.cos(a) * radius, 10 + Math.sin(a) * radius, seed, octaves);
+}
+
+// Colour
+function rgb(hex) {
+  const h = hex.replace('#', ''), n = parseInt(h.length < 6 ? h.replace(/./g, c => c + c) : h.slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+const rgba = (hex, a = 1) => { const [r, g, b] = rgb(hex); return `rgba(${r},${g},${b},${a})`; };
+const mix = (a, b, k) => '#' + rgb(a).map((v, i) => Math.round(lerp(v, rgb(b)[i], k)).toString(16).padStart(2, '0')).join('');
+function luminance(hex) {
+  const [r, g, b] = rgb(hex).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+const contrast = (a, b) => { const [x, y] = [luminance(a), luminance(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+// Whichever option reads best on bg: auto contrast for light and dark brands.
+const readable = (bg, ...options) => options.reduce((best, c) => (contrast(bg, c) > contrast(bg, best) ? c : best));
+
+// Layout for any format: u = 1px at 1080 on the short side; safe = the box inside the margins.
+function stage(w, h, margin = 0.07) {
+  const u = Math.min(w, h) / 1080, m = Math.round(Math.min(w, h) * margin), aspect = w / h;
+  return { u, w, h, aspect, cx: w / 2, cy: h / 2,
+           portrait: aspect < 0.8, square: aspect >= 0.8 && aspect <= 1.25, landscape: aspect > 1.25,
+           safe: { x: m, y: m, w: w - 2 * m, h: h - 2 * m } };
+}
+
+// Cached surfaces: built once per size, deterministic, so render stays pure.
+const _cache = new Map();
+function cached(key, make) { if (!_cache.has(key)) _cache.set(key, make()); return _cache.get(key); }
+function surface(w, h) { const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h)); return c; }
+
+// A ground that is never a flat fill: base colour, soft mottling, faint fibres.
+function ground(ctx, w, h, color, { seed = 1, mottle = 0.07, fibres = 0.05 } = {}) {
+  const tex = cached(`ground:${w}x${h}:${color}:${seed}:${mottle}:${fibres}`, () => {
+    const c = surface(w, h), g = c.getContext('2d'), u = Math.min(w, h) / 1080;
+    g.fillStyle = color; g.fillRect(0, 0, w, h);
+    const nw = 96, nh = Math.max(2, Math.round(96 * h / w)), n = surface(nw, nh), ng = n.getContext('2d');
+    const img = ng.createImageData(nw, nh);
+    for (let y = 0; y < nh; y++) for (let x = 0; x < nw; x++) {
+      const v = Math.round(fbm(x / 11, y / 11, seed) * 255), i = (y * nw + x) * 4;
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255;
+    }
+    ng.putImageData(img, 0, 0);
+    g.save(); g.globalAlpha = mottle * 2; g.globalCompositeOperation = 'overlay';
+    g.imageSmoothingQuality = 'high'; g.drawImage(n, 0, 0, w, h); g.restore();
+    g.save(); g.globalAlpha = fibres; g.strokeStyle = luminance(color) > 0.35 ? '#000' : '#fff';
+    g.lineWidth = Math.max(0.6, 0.9 * u); g.lineCap = 'round';
+    for (let i = 0, count = Math.round((w * h) / 3800); i < count; i++) {
+      const x = hash(i, seed + 1) * w, y = hash(i, seed + 2) * h, len = (6 + hash(i, seed + 3) * 24) * u, a = hash(i, seed + 4) * TAU;
+      g.beginPath(); g.moveTo(x, y);
+      g.quadraticCurveTo(x + Math.cos(a + 0.7) * len * 0.5, y + Math.sin(a + 0.7) * len * 0.5, x + Math.cos(a) * len, y + Math.sin(a) * len);
+      g.stroke();
+    }
+    g.restore();
+    return c;
+  });
+  ctx.drawImage(tex, 0, 0, w, h);
+}
+
+// Grain that re-rolls fps times a second (by frame index, so it loops). Specks both lighten and
+// darken, so it shows on dark and light grounds. amount ≈ 0.05–0.15; size = grain px at 1080.
+// 2 px grain changing 15×/s reads as film and keeps MP4s small; 1 px at 30 fps triples the file size.
+function grain(ctx, w, h, t, amount = 0.08, { fps = 15, size = 2 } = {}) {
+  const px = Math.max(1, Math.round(size * Math.min(w, h) / 1080)), cells = 256;
+  const tiles = cached(`grain:${px}`, () => Array.from({ length: 6 }, (_, k) => {
+    const small = surface(cells, cells), sg = small.getContext('2d'), img = sg.createImageData(cells, cells), d = img.data;
+    for (let i = 0; i < cells * cells; i++) {
+      const v = hash(i, 101 + k), a = Math.abs(v - 0.5) * 2;
+      d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v > 0.5 ? 255 : 0; d[i * 4 + 3] = Math.round(a * a * 255);
+    }
+    sg.putImageData(img, 0, 0);
+    const c = surface(cells * px, cells * px), g = c.getContext('2d');
+    g.imageSmoothingEnabled = false; g.drawImage(small, 0, 0, cells * px, cells * px);
+    return c;
+  }));
+  const f = frameOf(t, fps), span = cells * px, pat = ctx.createPattern(tiles[f % tiles.length], 'repeat');
+  pat.setTransform(new DOMMatrix([1, 0, 0, 1, -Math.floor(hash(f, 7) * cells) * px, -Math.floor(hash(f, 8) * cells) * px]));
+  ctx.save(); ctx.globalAlpha = amount; ctx.fillStyle = pat; ctx.fillRect(0, 0, w, h); ctx.restore();
+}
+
+// Light falling across the frame. angle in degrees: 90 = light from the top.
+function falloff(ctx, w, h, angle = 110, strength = 0.14) {
+  const a = (angle * Math.PI) / 180, r = Math.hypot(w, h) / 2, dx = Math.cos(a) * r, dy = Math.sin(a) * r;
+  const g = ctx.createLinearGradient(w / 2 - dx, h / 2 - dy, w / 2 + dx, h / 2 + dy);
+  g.addColorStop(0, `rgba(255,255,255,${strength})`); g.addColorStop(0.55, 'rgba(255,255,255,0)');
+  g.addColorStop(1, `rgba(0,0,0,${strength * 0.9})`);
+  ctx.save(); ctx.fillStyle = g; ctx.fillRect(0, 0, w, h); ctx.restore();
+}
+function vignette(ctx, w, h, strength = 0.3, cx = 0.5, cy = 0.46) {
+  const r = Math.hypot(w, h) * 0.62, g = ctx.createRadialGradient(w * cx, h * cy, r * 0.28, w * cx, h * cy, r);
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, `rgba(0,0,0,${strength})`);
+  ctx.save(); ctx.fillStyle = g; ctx.fillRect(0, 0, w, h); ctx.restore();
+}
+
+// Type
+const fontOf = (weight, px, family, style = '') => `${style} ${weight} ${px}px "${family}"`.trim();
+function fitSize(ctx, text, maxWidth, maxPx, weight, family, minPx = 8) {  // largest size ≤ maxPx that fits
+  ctx.save(); ctx.font = fontOf(weight, 100, family); const w100 = ctx.measureText(text).width; ctx.restore();
+  return clamp((maxWidth / Math.max(1, w100)) * 100, minPx, maxPx);
+}
+// Break text into lines that fit, never leaving one word alone on the last line.
+function lines(ctx, text, maxWidth) {
+  const out = [];
+  let cur = '';
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const next = cur ? cur + ' ' + word : word;
+    if (cur && ctx.measureText(next).width > maxWidth) { out.push(cur); cur = word; } else cur = next;
+  }
+  if (cur) out.push(cur);
+  const n = out.length;
+  if (n > 1 && !out[n - 1].includes(' ')) {
+    const prev = out[n - 2].split(' ');
+    if (prev.length > 1) {
+      const last = prev.pop() + ' ' + out[n - 1];
+      if (ctx.measureText(last).width <= maxWidth) { out[n - 2] = prev.join(' '); out[n - 1] = last; }
+    }
+  }
+  return out;
+}
+
+// Images (the real files: logos, screenshots, references)
+const IMAGES = {};
+function loadImage(src) {
+  return new Promise((ok, no) => {
+    const im = new Image();
+    if (CAPTURE) im.crossOrigin = 'anonymous';   // scripts need an untainted canvas
+    im.onload = () => ok(im); im.onerror = () => no(new Error('could not load image ' + String(src).slice(0, 96)));
+    im.src = src;
+  });
+}
+function drawContain(ctx, img, x, y, w, h) {  // fit inside the box, centred, aspect kept
+  const s = Math.min(w / img.width, h / img.height), dw = img.width * s, dh = img.height * s;
+  ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+  return { x: x + (w - dw) / 2, y: y + (h - dh) / 2, w: dw, h: dh };
+}
+
+// ── 3 · The one function ───────────────────────────────────────────────────
+// Everything that depends only on the frame size is laid out once and cached.
+function layout(w, h) {
+  return cached(`layout:${w}x${h}`, () => {
+    const S = stage(w, h), u = S.u;
+    const sx = w * (S.portrait ? 0.07 : 0.09), sy = h * (S.portrait ? 0.1 : 0.12);
+    const sw = w - 2 * sx, sh = h * (S.portrait ? 0.8 : 0.74);
+    const pad = sw * (S.portrait ? 0.09 : 0.065);
+    const titleMax = (S.portrait ? 92 : 72) * u;
+    const chart = { x: sx + pad, w: sw - 2 * pad,
+                    top: sy + pad + 30 * u + titleMax * (S.portrait ? 2.75 : 1.55),
+                    base: sy + sh - pad - 96 * u };
+    const vals = PARAMS.values, max = Math.max(...vals), slot = chart.w / vals.length, bw = slot * 0.52;
+    const bars = vals.map((v, i) => ({ v, x: chart.x + slot * (i + 0.5) - bw / 2, w: bw, h: (v / max) * (chart.base - chart.top) }));
+    return { S, u, sx, sy, sw, sh, pad, titleMax, chart, bars, hi: vals.length - 1 };
+  });
+}
+const invInOut = y => (y < 0.5 ? Math.cbrt(y / 4) : 1 - Math.cbrt(2 * (1 - y)) / 2);   // inverse of ease.inOut
+
+// Frame 0 is the poster/thumbnail, so start the cycle on its richest moment: the full chart.
+const POSTER = 3.0;
+
+function render(ctx, time, theme, w, h) {
+  const t = wrap(time + POSTER);
+  const L = layout(w, h), { S, u, sx, sy, sw, sh, pad, chart, bars, hi } = L;
+  const radius = 16 * u;
+
+  // Night ground with a dawn rim along the bottom edge (static, so cached).
+  ctx.drawImage(cached(`night:${w}x${h}:${theme.bg}`, () => {
+    const c = surface(w, h), g = c.getContext('2d');
+    ground(g, w, h, theme.bg, { seed: 5, mottle: 0.12, fibres: 0.03 });
+    g.save(); g.translate(w / 2, h * 1.04); g.scale(1, 0.2);
+    const r = Math.max(w, h) * 0.9, rim = g.createRadialGradient(0, 0, 0, 0, 0, r);
+    rim.addColorStop(0, rgba(theme.accent, 0.6)); rim.addColorStop(0.4, rgba(theme.accent2, 0.14)); rim.addColorStop(1, rgba(theme.accent2, 0));
+    g.fillStyle = rim; g.fillRect(-r, -r, 2 * r, 2 * r); g.restore();
+    g.save(); g.shadowColor = 'rgba(0,0,0,0.65)'; g.shadowBlur = 80 * u; g.shadowOffsetY = 30 * u;
+    g.fillStyle = theme.paper; g.beginPath(); g.roundRect(sx, sy, sw, sh, radius); g.fill(); g.restore();
+    return c;
+  }), 0, 0);
+
+  // The slide: ivory paper with tooth, a soft shadow and light falling across it; the torn ochre
+  // scrap and its compass sketch are part of the paper, so they're cached with it.
+  ctx.drawImage(cached(`slide:${w}x${h}:${theme.paper}`, () => {
+    const W = Math.round(sw), H = Math.round(sh), c = surface(W, H), g = c.getContext('2d');
+    g.beginPath(); g.roundRect(0, 0, W, H, radius); g.clip();
+    ground(g, W, H, theme.paper, { seed: 9, mottle: 0.09, fibres: 0.07 });
+    falloff(g, W, H, 125, 0.13);
+    // torn scrap: a jittered polygon, rotated, in the top-right corner
+    const cw = 190 * u, ch = 150 * u;
+    // over the second-to-last bar: the highlighted bar is the tallest, so its corner is taken
+    const nb = bars[Math.max(0, hi - 1)];
+    g.save(); g.translate(nb.x + nb.w / 2 - sx, pad + ch * 0.42); g.rotate(-0.1);
+    g.beginPath();
+    const edge = (x, y, i) => [x + (hash(i, 31) - 0.5) * 9 * u, y + (hash(i, 32) - 0.5) * 9 * u];
+    let k = 0;
+    for (let x = -cw / 2; x <= cw / 2; x += 12 * u) g.lineTo(...edge(x, -ch / 2, k++));
+    for (let y = -ch / 2; y <= ch / 2; y += 12 * u) g.lineTo(...edge(cw / 2, y, k++));
+    for (let x = cw / 2; x >= -cw / 2; x -= 12 * u) g.lineTo(...edge(x, ch / 2, k++));
+    for (let y = ch / 2; y >= -ch / 2; y -= 12 * u) g.lineTo(...edge(-cw / 2, y, k++));
+    g.closePath();
+    g.shadowColor = 'rgba(0,0,0,0.18)'; g.shadowBlur = 10 * u; g.shadowOffsetY = 4 * u;
+    g.fillStyle = theme.accent2; g.fill();
+    g.shadowColor = 'transparent';
+    // compass sketch in ink
+    g.strokeStyle = theme.ink; g.fillStyle = theme.ink; g.lineWidth = 2.2 * u; g.lineCap = 'round';
+    const r = 42 * u;
+    g.beginPath(); g.arc(0, 4 * u, r, 0.15, TAU - 0.1); g.stroke();
+    g.beginPath(); g.moveTo(-r * 1.25, 4 * u); g.lineTo(r * 1.25, 4 * u); g.moveTo(0, 4 * u - r * 1.25); g.lineTo(0, 4 * u + r * 1.25); g.stroke();
+    g.beginPath(); g.moveTo(0, 4 * u - r * 0.95); g.lineTo(9 * u, 4 * u); g.lineTo(0, 4 * u + r * 0.4); g.lineTo(-9 * u, 4 * u); g.closePath(); g.fill();
+    g.font = fontOf(600, 20 * u, theme.fontBody); g.textAlign = 'center'; g.fillText('N', 0, 4 * u - r * 1.35);
+    g.restore();
+    return c;
+  }), sx, sy);
+
+  // Title with a short clay rule above it.
+  const tpx = Math.min(L.titleMax, fitSize(ctx, PARAMS.title, chart.w * (S.portrait ? 0.95 : 0.62), 400, 500, theme.font));
+  ctx.fillStyle = theme.accent; ctx.fillRect(chart.x, sy + pad, 64 * u, 5 * u);
+  ctx.font = fontOf(500, tpx, theme.font);
+  ctx.fillStyle = theme.ink; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  const titleLines = S.portrait ? lines(ctx, PARAMS.title, chart.w * 0.6) : [PARAMS.title];
+  titleLines.forEach((ln, i) => ctx.fillText(ln, chart.x, sy + pad + 30 * u + tpx * (1 + 1.18 * i)));
+
+  // The beam: a soft clay wash sweeping left to right (0.1–1.7 s), clipped to the slide.
+  const band = sw * 0.2, x0 = sx - band, x1 = sx + sw + band;
+  const sweep = seg(t, 0.1, 1.7), bx = lerp(x0, x1, ease.inOut(sweep));
+  if (sweep > 0 && sweep < 1) {
+    ctx.save(); ctx.beginPath(); ctx.roundRect(sx, sy, sw, sh, radius); ctx.clip();
+    const gr = ctx.createLinearGradient(bx - band, 0, bx + band, 0);
+    gr.addColorStop(0, rgba(theme.accent, 0)); gr.addColorStop(0.5, rgba(theme.accent, 0.3)); gr.addColorStop(1, rgba(theme.accent, 0));
+    ctx.fillStyle = gr; ctx.fillRect(bx - band, sy, band * 2, sh);
+    ctx.restore();
+  }
+
+  // Bars rise only once the beam's centre reaches them, then settle back 60 ms apart (3.9 s on).
+  const starts = bars.map(b => 0.1 + 1.6 * invInOut(clamp((b.x + b.w / 2 - x0) / (x1 - x0))));
+  const landed = starts.map(s => s + 0.8);
+  const hNow = bars.map((b, i) => b.h * ease.out(seg(t, starts[i], landed[i])) * (1 - ease.inOut(seg(t, 3.9 + i * 0.06, 4.6 + i * 0.06))));
+  bars.forEach((b, i) => {
+    if (hNow[i] < 0.5) return;
+    ctx.fillStyle = i === hi ? theme.accent : theme.ink;
+    ctx.fillRect(b.x, chart.base - hNow[i], b.w, hNow[i]);
+  });
+  ctx.fillStyle = rgba(theme.ink, 0.6); ctx.fillRect(chart.x - 10 * u, chart.base, chart.w + 20 * u, 2 * u);
+
+  // Values under the baseline, always readable; "this quarter" under the clay bar.
+  ctx.textAlign = 'center';
+  bars.forEach((b, i) => {
+    ctx.font = fontOf(600, 40 * u, theme.fontBody);
+    ctx.fillStyle = i === hi ? theme.accent : rgba(theme.ink, 0.78);
+    ctx.fillText(String(b.v), b.x + b.w / 2, chart.base + 54 * u);
+  });
+  ctx.font = fontOf(500, 26 * u, theme.fontBody); ctx.fillStyle = rgba(theme.ink, 0.6);
+  ctx.fillText(PARAMS.note, bars[hi].x + bars[hi].w / 2, chart.base + 90 * u);
+
+  // Trend line: draws through the tops after every bar has landed, dots land on the tops,
+  // then the clay nib settles on this quarter. Fades out before the bars settle.
+  const l0 = Math.max(...landed) + 0.05, l1 = l0 + 1.1;
+  const fade = 1 - ease.inOut(seg(t, 3.6, 3.9));
+  const k = ease.inOut(seg(t, l0, l1));
+  if (k > 0 && fade > 0) {
+    const pts = bars.map(b => [b.x + b.w / 2, chart.base - b.h]);
+    const lens = [0];
+    for (let i = 1; i < pts.length; i++) lens.push(lens[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+    const Lk = lens[lens.length - 1] * k;
+    ctx.save(); ctx.globalAlpha = fade;
+    ctx.strokeStyle = theme.ink; ctx.lineWidth = 5 * u; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(...pts[0]);
+    for (let i = 1; i < pts.length; i++) {
+      if (lens[i] <= Lk) ctx.lineTo(...pts[i]);
+      else { const f = (Lk - lens[i - 1]) / (lens[i] - lens[i - 1]); ctx.lineTo(lerp(pts[i - 1][0], pts[i][0], f), lerp(pts[i - 1][1], pts[i][1], f)); break; }
+    }
+    ctx.stroke();
+    pts.forEach(([px, py], i) => {
+      const tAt = l0 + 1.1 * invInOut(lens[i] / lens[lens.length - 1]);
+      const pop = ease.outBack(seg(t, tAt, tAt + 0.25));
+      if (pop <= 0) return;
+      ctx.fillStyle = theme.ink;
+      ctx.beginPath(); ctx.arc(px, py, 12 * u * pop, 0, TAU); ctx.fill();
+      ctx.fillStyle = theme.paper;
+      ctx.beginPath(); ctx.arc(px, py, 4.5 * u * pop, 0, TAU); ctx.fill();
+    });
+    // the clay nib, tip resting on this quarter's top
+    const nib = ease.outBack(seg(t, l1 - 0.1, l1 + 0.3));
+    if (nib > 0) {
+      const [px, py] = pts[hi];
+      ctx.save(); ctx.translate(px + 6 * u, py - 16 * u); ctx.rotate(-0.55); ctx.scale(nib * 1.8, nib * 1.8);
+      ctx.fillStyle = theme.accent;
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-17 * u, -46 * u); ctx.lineTo(-11 * u, -62 * u); ctx.lineTo(11 * u, -62 * u); ctx.lineTo(17 * u, -46 * u); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = theme.paper; ctx.lineWidth = 2 * u;
+      ctx.beginPath(); ctx.moveTo(0, -4 * u); ctx.lineTo(0, -34 * u); ctx.stroke();
+      ctx.fillStyle = theme.paper; ctx.beginPath(); ctx.arc(0, -38 * u, 4 * u, 0, TAU); ctx.fill();
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  vignette(ctx, w, h, 0.3);
+  grain(ctx, w, h, t, 0.08);
+}
+
+// Optional sound written in code and locked to the loop (see assets/snippets/sound.js).
+// score(audioCtx, when, out) schedules one loop of audio starting at audio time `when`.
+const score = null;
+
+// ── 4 · Harness: player + the window.RISE contract the scripts use. Leave as is. ──
+const CAPTURE = new URLSearchParams(location.search).has('capture');
+if (CAPTURE) document.body.classList.add('capture');
+const ready = (async () => {
+  await Promise.all(FONTS.map(f => document.fonts.load(f).catch(() => null)));
+  const wanted = { ...ASSETS, ...(BRAND.logo ? { logo: BRAND.logo } : {}) };
+  await Promise.all(Object.entries(wanted).map(([k, src]) =>
+    loadImage(src).then(im => { IMAGES[k] = im; }).catch(e => console.error(e.message))));
+  for (const job of PRELOAD) await job();
+})();
+window.RISE = { version: 1, render, score, ready, DURATION, FPS, FORMATS, SIZES, THEME, PARAMS, BRAND, FONTS, UNDER };
+
+if (!CAPTURE) (async () => {
+  await ready;
+  const q = new URLSearchParams(location.search), $ = id => document.getElementById(id);
+  const view = $('view'), ctx = view.getContext('2d'), stageEl = $('stage');
+  let fmt = FORMATS.includes(q.get('format')) ? q.get('format') : FORMATS[0];
+  let playing = !q.has('t'), t = q.has('t') ? clamp(+q.get('t') || 0, 0, DURATION) : 0, last = performance.now();
+  let under = null;
+  if (UNDER) { under = document.createElement('video'); under.id = 'under'; under.src = UNDER.src; under.muted = true; under.playsInline = true; under.loop = true; stageEl.prepend(under); }
+
+  function layout() {
+    const [w, h] = SIZES[fmt] || [1920, 1080];
+    if (view.width !== w || view.height !== h) { view.width = w; view.height = h; }
+    const W = stageEl.clientWidth - 32, H = stageEl.clientHeight - 32, s = Math.min(W / w, H / h);
+    const left = (stageEl.clientWidth - w * s) / 2, top = (stageEl.clientHeight - h * s) / 2;
+    Object.assign(view.style, { width: w * s + 'px', height: h * s + 'px', left: left + 'px', top: top + 'px' });
+    if (under) {
+      const [rx, ry, rw, rh] = UNDER.rect || [0, 0, w, h];
+      Object.assign(under.style, { left: left + rx * s + 'px', top: top + ry * s + 'px', width: rw * s + 'px', height: rh * s + 'px' });
+    }
+  }
+  const fmtBox = $('formats');
+  for (const f of FORMATS) {
+    const b = document.createElement('button'); b.textContent = f; b.dataset.f = f;
+    b.onclick = () => { fmt = f; syncButtons(); layout(); };
+    fmtBox.append(b);
+  }
+  const syncButtons = () => fmtBox.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.f === fmt)));
+  syncButtons(); layout(); addEventListener('resize', layout);
+
+  const playBtn = $('play'), scrub = $('scrub'), timeEl = $('time');
+  const setPlaying = p => { playing = p; playBtn.textContent = p ? 'Pause' : 'Play'; if (under) p ? under.play().catch(() => {}) : under.pause(); };
+  playBtn.onclick = () => setPlaying(!playing);
+  scrub.oninput = () => { setPlaying(false); t = (scrub.value / 1000) * DURATION; };
+  addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' && e.key !== ' ') return;
+    if (e.key === ' ') { e.preventDefault(); setPlaying(!playing); }
+    else if (e.key === 'ArrowRight') { setPlaying(false); t = wrap(t + 1 / FPS); }
+    else if (e.key === 'ArrowLeft') { setPlaying(false); t = wrap(t - 1 / FPS); }
+    else if (/^[1-9]$/.test(e.key) && FORMATS[+e.key - 1]) { fmt = FORMATS[+e.key - 1]; syncButtons(); layout(); }
+  });
+  setPlaying(playing);
+
+  // Sound starts muted; when on, each loop's score is scheduled just before the loop begins.
+  const soundBtn = $('sound');
+  let actx = null, out = null, soundOn = false, scheduledFor = -1, loopCount = 0;
+  if (typeof score === 'function') {
+    soundBtn.hidden = false;
+    soundBtn.onclick = async () => {
+      if (!actx) { actx = new AudioContext(); out = actx.createGain(); out.connect(actx.destination); }
+      soundOn = !soundOn; await actx.resume(); out.gain.value = soundOn ? 1 : 0; scheduledFor = -1;
+      soundBtn.textContent = soundOn ? 'Sound on' : 'Sound off'; soundBtn.setAttribute('aria-pressed', String(soundOn));
+    };
+  }
+
+  function frame(now) {
+    const prev = t;
+    if (playing) t = (t + Math.min(0.1, (now - last) / 1000)) % DURATION;
+    last = now;
+    if (t < prev && playing) loopCount++;
+    if (soundOn && playing && DURATION - t < 0.3 && scheduledFor !== loopCount + 1) {
+      scheduledFor = loopCount + 1; score(actx, actx.currentTime + (DURATION - t), out);
+    }
+    if (under && playing && Math.abs(under.currentTime - (t % (under.duration || DURATION))) > 0.12) under.currentTime = t % (under.duration || DURATION);
+    if (under && !playing) under.currentTime = t % (under.duration || DURATION);
+    if (ctx.reset) ctx.reset(); else ctx.clearRect(0, 0, view.width, view.height);
+    ctx.save(); render(ctx, t, THEME, view.width, view.height); ctx.restore();
+    scrub.value = Math.round((t / DURATION) * 1000);
+    timeEl.textContent = `${t.toFixed(2)} / ${DURATION.toFixed(2)}s`;
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

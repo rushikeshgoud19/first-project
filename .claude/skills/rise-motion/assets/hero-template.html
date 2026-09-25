@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hero, in motion</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;800&family=Newsreader:opsz,wght@6..72,500&display=swap">
+<style>
+  /* Colours and type come from THEME (set in the script) so a brand.json restyles everything. */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); font: 17px/1.55 var(--font-body), system-ui, sans-serif; }
+  a { color: inherit; }
+  .layer { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .nav { position: absolute; top: 0; left: 0; right: 0; z-index: 3; display: flex; align-items: center; gap: 28px;
+         padding: 20px clamp(16px, 4vw, 56px); }
+  .nav .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; text-decoration: none; font-size: 19px; }
+  .nav .brand img { height: 28px; width: auto; display: block; }
+  .nav nav { display: flex; gap: 22px; margin-left: auto; }
+  .nav nav a { text-decoration: none; opacity: .8; }
+  .nav nav a:hover { opacity: 1; }
+  .hero { position: relative; min-height: max(620px, 100vh); display: grid; place-items: center; overflow: hidden; }
+  .copy { position: relative; z-index: 2; max-width: 880px; padding: 120px clamp(16px, 5vw, 48px) 96px; text-align: center; }
+  .copy h1 { font: 500 clamp(40px, 6.4vw, 92px)/1.08 var(--font-display), Georgia, serif; letter-spacing: -0.02em;
+             margin: 0 0 22px; text-wrap: balance; }
+  .copy p { font-size: clamp(17px, 1.6vw, 21px); line-height: 1.5; max-width: 640px; margin: 0 auto 34px; opacity: .82; text-wrap: pretty; }
+  .btn { display: inline-block; padding: 14px 26px; border-radius: 999px; background: var(--accent); color: var(--on-accent);
+         text-decoration: none; font-weight: 600; box-shadow: 0 8px 24px -10px var(--accent); }
+  .btn:hover { filter: brightness(1.06); }
+  .btn:focus-visible, .nav a:focus-visible { outline: 3px solid var(--accent2); outline-offset: 3px; }
+  .foot { position: relative; overflow: hidden; background: var(--ink); color: var(--bg); min-height: 420px;
+          padding: 72px clamp(16px, 5vw, 56px) 40px; display: flex; flex-direction: column; justify-content: space-between; }
+  .foot .cols { position: relative; z-index: 2; display: flex; flex-wrap: wrap; gap: 48px; }
+  .foot .cols div { display: grid; gap: 8px; min-width: 140px; }
+  .foot .cols b { font-weight: 600; margin-bottom: 4px; }
+  .foot .cols a { text-decoration: none; opacity: .75; }
+  .foot .cols a:hover { opacity: 1; text-decoration: underline; }
+  .foot small { position: relative; z-index: 2; opacity: .6; margin-top: 48px; }
+  @media (max-width: 640px) { .nav nav { display: none; } .copy { padding-top: 104px; } }
+  body.capture > * { display: none !important; }
+</style>
+</head>
+<body>
+<header class="nav">
+  <a class="brand" href="#" aria-label="Home"><img id="logo" alt="" hidden><span id="brand-name"></span></a>
+  <nav aria-label="Main"><a href="#">Product</a><a href="#">Pricing</a><a href="#">About</a></nav>
+</header>
+<section class="hero">
+  <canvas class="layer" data-scene="hero" aria-hidden="true"></canvas>
+  <div class="copy">
+    <h1 id="headline"></h1>
+    <p id="subline"></p>
+    <a class="btn" id="cta" href="#"></a>
+  </div>
+</section>
+<footer class="foot">
+  <canvas class="layer" data-scene="footer" aria-hidden="true"></canvas>
+  <div class="cols">
+    <div><b>Product</b><a href="#">Overview</a><a href="#">Pricing</a><a href="#">Changelog</a></div>
+    <div><b>Company</b><a href="#">About</a><a href="#">Careers</a><a href="#">Contact</a></div>
+    <div><b>Legal</b><a href="#">Privacy</a><a href="#">Terms</a></div>
+  </div>
+  <small id="legal"></small>
+</footer>
+<script>
+/* ─────────────────────────────────────────────────────────────────────────────
+   RISE brief (Level 2: a website hero that comes alive)
+   R  References: brand.json from the scraper (colours, fonts, logo, copy)
+   I  Idea: a wave of light dots under the headline; dots lift off it like birds and drift up.
+      In the footer the same dots gather into the wordmark behind the links.
+   S  Style: the brand's own ground, ink and accent; calm, eased; dots lean toward the cursor and
+      scatter on click. Headline, subline, button and links stay real HTML text.
+   E  Examine: python <skill>/scripts/check.py <this file>            (canvas layers)
+               python <skill>/scripts/check.py <this file> --page     (the real page, desktop + mobile)
+   ───────────────────────────────────────────────────────────────────────────── */
+
+// ── 1 · Settings ────────────────────────────────────────────────────────────
+const O = window.RISE_OVERRIDES || {};
+const DURATION = 8, FPS = 30;
+const FORMATS = ['16:9', '9:16'];                  // desktop and phone shapes for check.py
+const SIZES = { '16:9': [1920, 1080], '9:16': [1080, 1920] };
+const BRAND = { name: 'Brand', logo: null, copy: {}, ...O.brand };
+const PARAMS = { scene: 'hero',
+                 headline: BRAND.copy.headline || 'Say it once. Watch it take flight.',
+                 subline: BRAND.copy.subline || 'A calm, living hero drawn in code: real text on top, motion underneath.',
+                 cta: BRAND.copy.cta || 'Get started', wordmark: BRAND.name || 'Brand', ...O.params };
+const THEME = { bg: '#f4f1ea', ink: '#1a1a18', accent: '#b5d334', accent2: '#2f5d50',
+                font: 'Newsreader', fontBody: 'Inter', ...O.theme };
+const ASSETS = {};
+const PRELOAD = [];
+const FONTS = [`800 200px "${THEME.fontBody}"`, `500 64px "${THEME.font}"`, `400 17px "${THEME.fontBody}"`];
+const UNDER = null;
+
+// ── 2 · Helpers (same kit as template.html) ─────────────────────────────────
+const TAU = Math.PI * 2;
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const seg = (t, a, b) => clamp((t - a) / (b - a));
+const ease = { inOut: k => (k < 0.5 ? 4 * k ** 3 : 1 - (-2 * k + 2) ** 3 / 2), out: k => 1 - (1 - k) ** 3,
+               outQuint: k => 1 - (1 - k) ** 5, inOutSine: k => -(Math.cos(Math.PI * k) - 1) / 2 };
+const wrap = t => ((t % DURATION) + DURATION) % DURATION;
+const phase = t => wrap(t) / DURATION;
+const wave = (t, cycles = 1, offset = 0) => Math.sin(TAU * (cycles * t / DURATION + offset));
+const frameOf = (t, fps = FPS) => Math.floor(wrap(t) * fps + 1e-6);
+function hash(i, seed = 0) {
+  let x = (Math.imul(i | 0, 0x27d4eb2d) ^ Math.imul((seed | 0) + 0x9e3779b9, 0x165667b1)) | 0;
+  x = Math.imul(x ^ (x >>> 15), 0x85ebca6b); x = Math.imul(x ^ (x >>> 13), 0xc2b2ae35);
+  return ((x ^ (x >>> 16)) >>> 0) / 4294967296;
+}
+const hash2 = (x, y, seed = 0) => hash(((x | 0) * 73856093) ^ ((y | 0) * 19349663), seed);
+function noise(x, y = 0, seed = 0) {
+  const xi = Math.floor(x), yi = Math.floor(y), s = k => k * k * (3 - 2 * k), u = s(x - xi), v = s(y - yi);
+  return lerp(lerp(hash2(xi, yi, seed), hash2(xi + 1, yi, seed), u), lerp(hash2(xi, yi + 1, seed), hash2(xi + 1, yi + 1, seed), u), v);
+}
+function rgb(hex) { const h = hex.replace('#', ''), n = parseInt(h.length < 6 ? h.replace(/./g, c => c + c) : h.slice(0, 6), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+const rgba = (hex, a = 1) => { const [r, g, b] = rgb(hex); return `rgba(${r},${g},${b},${a})`; };
+function luminance(hex) { const [r, g, b] = rgb(hex).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; }
+const contrast = (a, b) => { const [x, y] = [luminance(a), luminance(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+const readable = (bg, ...options) => options.reduce((best, c) => (contrast(bg, c) > contrast(bg, best) ? c : best));
+const _cache = new Map();
+function cached(key, make) { if (!_cache.has(key)) _cache.set(key, make()); return _cache.get(key); }
+function surface(w, h) { const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h)); return c; }
+function grain(ctx, w, h, t, amount = 0.05, { fps = 15, size = 2 } = {}) {
+  const px = Math.max(1, Math.round(size * Math.min(w, h) / 1080)), cells = 256;
+  const tiles = cached(`grain:${px}`, () => Array.from({ length: 6 }, (_, k) => {
+    const small = surface(cells, cells), sg = small.getContext('2d'), img = sg.createImageData(cells, cells), d = img.data;
+    for (let i = 0; i < cells * cells; i++) { const v = hash(i, 101 + k), a = Math.abs(v - 0.5) * 2; d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v > 0.5 ? 255 : 0; d[i * 4 + 3] = Math.round(a * a * 255); }
+    sg.putImageData(img, 0, 0);
+    const c = surface(cells * px, cells * px), g = c.getContext('2d'); g.imageSmoothingEnabled = false; g.drawImage(small, 0, 0, cells * px, cells * px); return c;
+  }));
+  const f = frameOf(t, fps), pat = ctx.createPattern(tiles[f % tiles.length], 'repeat');
+  pat.setTransform(new DOMMatrix([1, 0, 0, 1, -Math.floor(hash(f, 7) * cells) * px, -Math.floor(hash(f, 8) * cells) * px]));
+  ctx.save(); ctx.globalAlpha = amount; ctx.fillStyle = pat; ctx.fillRect(0, 0, w, h); ctx.restore();
+}
+const IMAGES = {};
+function loadImage(src) {
+  return new Promise((ok, no) => { const im = new Image(); if (CAPTURE) im.crossOrigin = 'anonymous';
+    im.onload = () => ok(im); im.onerror = () => no(new Error('could not load image ' + String(src).slice(0, 96))); im.src = src; });
+}
+
+// Input for interactive layers, part of render's arguments so frames stay reproducible:
+// { x, y } pointer in canvas px (or null) and clicks: [{ x, y, age }] with age in seconds.
+const NO_INPUT = { x: null, y: null, clicks: [] };
+
+// Pointer pull and click push for a dot at (x, y). Returns [dx, dy, glow 0–1].
+function interact(x, y, input, u) {
+  let dx = 0, dy = 0, glow = 0;
+  if (input.x !== null) {
+    const vx = input.x - x, vy = input.y - y, d2 = vx * vx + vy * vy, s = 180 * u, k = Math.exp(-d2 / (2 * s * s));
+    dx += vx * 0.18 * k; dy += vy * 0.18 * k; glow = k;
+  }
+  for (const c of input.clicks) {
+    const vx = x - c.x, vy = y - c.y, d = Math.hypot(vx, vy) + 1e-3, push = 140 * u * Math.exp(-c.age * 2.6) * Math.exp(-d / (260 * u));
+    dx += (vx / d) * push; dy += (vy / d) * push;
+  }
+  return [dx, dy, glow];
+}
+
+// ── 3 · The scenes ──────────────────────────────────────────────────────────
+function renderHero(ctx, t, theme, w, h, input = NO_INPUT) {
+  const u = Math.min(w, h) / 1080, portrait = h > w;
+  ctx.fillStyle = theme.bg; ctx.fillRect(0, 0, w, h);
+  const glowG = ctx.createRadialGradient(w * 0.5, h * 0.42, 0, w * 0.5, h * 0.42, Math.max(w, h) * 0.7);
+  glowG.addColorStop(0, rgba('#ffffff', 0.35)); glowG.addColorStop(1, rgba(theme.ink, 0.06));
+  ctx.fillStyle = glowG; ctx.fillRect(0, 0, w, h);
+
+  // The wave: three ribbons of dots across the lower third, breathing in whole cycles per loop.
+  const baseY = h * (portrait ? 0.8 : 0.78), N = Math.round(w / (9 * u));
+  for (let k = 0; k < 3; k++) {
+    for (let i = 0; i <= N; i++) {
+      const x = (i / N) * w, env = Math.sin(Math.PI * (i / N)) ** 1.5;
+      const y = baseY + (k - 1) * 26 * u + env * 70 * u * wave(t, 1, i / N * 1.3 + k * 0.21) * (0.6 + 0.4 * wave(t, 2, k * 0.3));
+      const [dx, dy, glow] = interact(x, y, input, u);
+      ctx.fillStyle = rgba(k === 1 ? theme.accent2 : theme.accent, 0.5 + 0.5 * env);
+      ctx.beginPath(); ctx.arc(x + dx, y + dy, (2.2 + 2.2 * env + 3 * glow) * u, 0, TAU); ctx.fill();
+    }
+  }
+  // Birds: dots that lift off the wave, drift up toward the headline and fade. Each one's life is
+  // a phase offset of the loop, so the flock is seamless at t = DURATION.
+  const birds = 90;
+  for (let i = 0; i < birds; i++) {
+    const life = (phase(t) * 2 + hash(i, 3)) % 1;                // two lives per loop
+    const x0 = (0.08 + 0.84 * hash(i, 4)) * w, rise = ease.out(life) * h * 0.42;
+    const sway = Math.sin(TAU * (life * 1.5 + hash(i, 5))) * 40 * u;
+    let x = x0 + sway, y = baseY - rise;
+    const [dx, dy] = interact(x, y, input, u);
+    x += dx; y += dy;
+    const a = Math.sin(Math.PI * life) * 0.9, s = (3 + 5 * hash(i, 6)) * u * (1 - 0.4 * life);
+    ctx.save(); ctx.translate(x, y); ctx.rotate(Math.sin(TAU * (life * 2 + hash(i, 7))) * 0.4);
+    ctx.strokeStyle = rgba(i % 3 ? theme.accent : theme.accent2, a); ctx.lineWidth = 1.6 * u; ctx.lineCap = 'round';
+    const flap = Math.sin(TAU * (life * 6 + hash(i, 8))) * 0.6 * s;  // wings: a small "v" that flaps
+    ctx.beginPath(); ctx.moveTo(-s * 1.2, -flap); ctx.quadraticCurveTo(-s * 0.4, -s * 0.2, 0, 0); ctx.quadraticCurveTo(s * 0.4, -s * 0.2, s * 1.2, -flap); ctx.stroke();
+    ctx.restore();
+  }
+  for (const c of input.clicks) {  // a soft ring where the visitor clicked
+    ctx.strokeStyle = rgba(theme.accent, Math.max(0, 0.5 - c.age * 0.4)); ctx.lineWidth = 2 * u;
+    ctx.beginPath(); ctx.arc(c.x, c.y, c.age * 420 * u, 0, TAU); ctx.stroke();
+  }
+  grain(ctx, w, h, t, 0.05);
+}
+
+function renderFooter(ctx, t, theme, w, h, input = NO_INPUT) {
+  const u = Math.min(w, h) / 1080, bg = theme.ink;
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h);
+  const lift = ctx.createRadialGradient(w * 0.3, h * 0.1, 0, w * 0.3, h * 0.1, Math.max(w, h) * 0.9);
+  lift.addColorStop(0, rgba('#ffffff', 0.07)); lift.addColorStop(1, rgba('#000000', 0.18));
+  ctx.fillStyle = lift; ctx.fillRect(0, 0, w, h);                     // light falls across: never flat
+  // Sample the wordmark once per size into target points (cached, so render stays cheap and pure).
+  const step = Math.max(4, Math.round(Math.min(w, h) / 90));
+  const pts = cached(`mark:${w}x${h}:${PARAMS.wordmark}:${theme.fontBody}:${step}`, () => {
+    const c = surface(w, h), g = c.getContext('2d');
+    let size = h * 0.7;
+    g.font = `800 ${size}px "${theme.fontBody}"`;
+    size *= Math.min(1, (w * 0.92) / g.measureText(PARAMS.wordmark).width);
+    g.font = `800 ${size}px "${theme.fontBody}"`; g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+    g.fillStyle = '#000'; g.fillText(PARAMS.wordmark, w / 2, h * 0.94);
+    const d = g.getImageData(0, 0, w, h).data, out = [];
+    for (let y = 0; y < h; y += step) for (let x = 0; x < w; x += step) if (d[(y * w + x) * 4 + 3] > 128) out.push([x, y]);
+    return out;
+  });
+  const dot = readable(bg, theme.accent, theme.accent2, theme.bg);
+  pts.forEach(([x, y], i) => {
+    // Each dot breathes on a small circle through noise space: back where it started every loop.
+    const ox = (noise(i * 0.05 + Math.cos(TAU * phase(t)) * 0.6, Math.sin(TAU * phase(t)) * 0.6, 9) - 0.5) * 10 * u;
+    const oy = (noise(i * 0.05 + 40 + Math.cos(TAU * phase(t)) * 0.6, Math.sin(TAU * phase(t)) * 0.6, 11) - 0.5) * 10 * u;
+    const [dx, dy, glow] = interact(x + ox, y + oy, input, u);
+    ctx.fillStyle = rgba(dot, 0.22 + 0.5 * glow);
+    ctx.fillRect(x + ox + dx - step * 0.28, y + oy + dy - step * 0.28, step * 0.56, step * 0.56);
+  });
+  grain(ctx, w, h, t, 0.06);
+}
+
+const SCENES = { hero: renderHero, footer: renderFooter };
+const render = SCENES[PARAMS.scene] || renderHero;   // check.py checks this one; --param scene=footer for the other
+const score = null;
+
+// ── 4 · Harness: page wiring, player and the window.RISE contract. Leave as is. ──
+const CAPTURE = new URLSearchParams(location.search).has('capture');
+if (CAPTURE) document.body.classList.add('capture');
+const root = document.documentElement.style;
+for (const [k, v] of Object.entries({ '--bg': THEME.bg, '--ink': THEME.ink, '--accent': THEME.accent, '--accent2': THEME.accent2,
+  '--on-accent': readable(THEME.accent, '#ffffff', THEME.ink, '#111111'),
+  '--font-display': `"${THEME.font}"`, '--font-body': `"${THEME.fontBody}"` })) root.setProperty(k, v);
+document.getElementById('headline').textContent = PARAMS.headline;
+document.getElementById('subline').textContent = PARAMS.subline;
+document.getElementById('cta').textContent = PARAMS.cta;
+document.getElementById('brand-name').textContent = BRAND.name;
+document.getElementById('legal').textContent = `© ${new Date().getFullYear()} ${BRAND.name}`;
+const ready = (async () => {
+  await Promise.all(FONTS.map(f => document.fonts.load(f).catch(() => null)));
+  if (BRAND.logo) await loadImage(BRAND.logo).then(im => { IMAGES.logo = im; const el = document.getElementById('logo'); el.src = BRAND.logo; el.hidden = false; document.getElementById('brand-name').hidden = true; }).catch(e => console.error(e.message));
+  for (const job of PRELOAD) await job();
+})();
+window.RISE = { version: 1, render, score, ready, DURATION, FPS, FORMATS, SIZES, THEME, PARAMS, BRAND, FONTS, UNDER };
+
+if (!CAPTURE) (async () => {
+  await ready;
+  const q = new URLSearchParams(location.search), still = q.has('t');
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const dpr = Math.min(2, devicePixelRatio || 1);
+  const layers = [...document.querySelectorAll('canvas[data-scene]')].map(canvas => ({
+    canvas, ctx: canvas.getContext('2d'), fn: SCENES[canvas.dataset.scene], visible: true,
+    pointer: null, clicks: [],
+  }));
+  const io = new IntersectionObserver(es => es.forEach(e => { const L = layers.find(l => l.canvas === e.target); if (L) L.visible = e.isIntersecting; }));
+  layers.forEach(L => {
+    io.observe(L.canvas);
+    const host = L.canvas.parentElement, pos = e => { const r = L.canvas.getBoundingClientRect(); return { x: (e.clientX - r.left) * dpr, y: (e.clientY - r.top) * dpr }; };
+    host.addEventListener('pointermove', e => { L.pointer = pos(e); });
+    host.addEventListener('pointerleave', () => { L.pointer = null; });
+    host.addEventListener('pointerdown', e => { L.clicks.push({ ...pos(e), at: performance.now() }); });
+  });
+  const size = L => {
+    const w = Math.round(L.canvas.clientWidth * dpr), h = Math.round(L.canvas.clientHeight * dpr);
+    if (L.canvas.width !== w || L.canvas.height !== h) { L.canvas.width = w; L.canvas.height = h; }
+  };
+  const draw = (L, t, now) => {
+    size(L);
+    L.clicks = L.clicks.filter(c => now - c.at < 2500);
+    const input = { x: L.pointer ? L.pointer.x : null, y: L.pointer ? L.pointer.y : null,
+                    clicks: L.clicks.map(c => ({ x: c.x, y: c.y, age: (now - c.at) / 1000 })) };
+    L.ctx.save(); L.fn(L.ctx, t, THEME, L.canvas.width, L.canvas.height, input); L.ctx.restore();
+  };
+  if (still || reduce) {  // ?t=2.5 for screenshots; reduced motion gets one calm frame
+    const t = still ? clamp(+q.get('t') || 0, 0, DURATION) : DURATION * 0.35;
+    const paint = () => layers.forEach(L => draw(L, t, performance.now()));
+    paint(); addEventListener('resize', paint);
+    return;
+  }
+  const start = performance.now();
+  const frame = now => {
+    const t = ((now - start) / 1000) % DURATION;
+    for (const L of layers) if (L.visible) draw(L, t, now);
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

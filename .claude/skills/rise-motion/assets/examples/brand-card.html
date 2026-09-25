@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{Name}, in motion</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- One stylesheet for every family render() uses. display=block avoids a fallback flash. -->
+<!-- Fonts differ per brand: loaded at runtime from THEME.font in PRELOAD (loadGoogleFonts). -->
+<style>
+  :root { --chrome: #0c0c0d; --line: #2a2a2e; --text: #d9d6cf; --muted: #8d8a84; --hi: #f2efe8; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--chrome); color: var(--text);
+               font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: grid; grid-template-rows: minmax(0, 1fr) auto; }
+  #stage { position: relative; overflow: hidden; }
+  #stage > * { position: absolute; }
+  #view { box-shadow: 0 18px 60px rgba(0, 0, 0, .55); }
+  #under { object-fit: cover; }
+  #bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 16px;
+         border-top: 1px solid var(--line); }
+  #bar button { background: #1b1b1e; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+                padding: 5px 10px; font: inherit; cursor: pointer; }
+  #bar button:hover { color: var(--hi); border-color: #3b3b40; }
+  #bar button[aria-pressed="true"] { background: var(--hi); color: #111; border-color: var(--hi); }
+  #scrub { flex: 1 1 160px; min-width: 120px; accent-color: var(--hi); }
+  #time { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 92px; }
+  #formats { display: flex; gap: 6px; }
+  body.capture { display: block; background: transparent; }
+  body.capture #bar, body.capture #stage { display: none; }
+</style>
+</head>
+<body>
+<main id="stage"><canvas id="view"></canvas></main>
+<nav id="bar" aria-label="Player">
+  <button id="play" aria-label="Play or pause (space)">Pause</button>
+  <input id="scrub" type="range" min="0" max="1000" value="0" aria-label="Time">
+  <span id="time">0.00 / 0.00s</span>
+  <span id="formats"></span>
+  <button id="sound" hidden aria-label="Toggle sound">Sound off</button>
+</nav>
+<script>
+/* ─────────────────────────────────────────────────────────────────────────────
+   RISE brief (keep in sync with brief.md)
+   EXAMPLE (recipe 7). Runs as is; brands come in via check.py/export.py --brand / --brands.
+   R  brands/<slug>/brand.json per site (injected by check.py/export.py --brand/--brands).
+   I  8 s. The real logo strikes in, the brand colours sweep behind it, "{Name}, in motion" lands;
+      hold; clears. Frame 0 = the finished card.
+   S  Any brand: its ground, colours and font; auto contrast (plate for low-contrast logos). 1:1.
+   E  Examine: python <skill>/scripts/check.py <this file>
+   ───────────────────────────────────────────────────────────────────────────── */
+
+// ── 1 · Settings ────────────────────────────────────────────────────────────
+const O = window.RISE_OVERRIDES || {};             // export.py --brand / --theme / --param land here
+const DURATION = 8;                                 // seconds per loop; frame(0) must equal frame(DURATION)
+const FPS = 30;                                     // grain refresh, stepped motion and export default
+const FORMATS = ['1:1'];            // formats this piece is designed for; check.py renders each
+const SIZES = { '16:9': [1920, 1080], '9:16': [1080, 1920], '1:1': [1080, 1080], '4:5': [1080, 1350] };
+const PARAMS = { line: '{Name}, in motion', ...O.params };   // user-editable knobs live here
+const THEME = { bg: '#f4f1ea', ink: '#141413', accent: '#d97757', accent2: '#2f5d50',
+                font: 'Newsreader', fontBody: 'Inter', ...O.theme };
+const BRAND = { name: 'Brand', logo: null, ...O.brand };  // logo: path or data URL of the REAL file, never redrawn
+const ASSETS = {};                                   // extra images: { slide: 'ref/slide.png' } → IMAGES.slide
+let LOGO_INK = null;                                  // the logo's dominant colour, for the contrast decision
+async function loadGoogleFonts(families, weights = '400;500;700') {
+  const url = 'https://fonts.googleapis.com/css2?' + [...new Set(families)].map(f => 'family=' + encodeURIComponent(f).replace(/%20/g, '+') + ':wght@' + weights).join('&') + '&display=block';
+  await new Promise(ok => { const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = url; l.onload = l.onerror = ok; document.head.appendChild(l); });
+  await Promise.all(families.map(f => document.fonts.load(`500 64px "${f}"`).catch(() => null)));
+}
+const PRELOAD = [
+  () => loadGoogleFonts([THEME.font]),
+  async () => {                                        // average colour of the logo's opaque pixels
+    if (!IMAGES.logo) return;
+    const c = surface(64, 64), g = c.getContext('2d', { willReadFrequently: true });
+    drawContain(g, IMAGES.logo, 0, 0, 64, 64);
+    const d = g.getImageData(0, 0, 64, 64).data; let r = 0, gg = 0, b = 0, n = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 160) { r += d[i]; gg += d[i + 1]; b += d[i + 2]; n++; }
+    if (n) LOGO_INK = '#' + [r, gg, b].map(v => Math.round(v / n).toString(16).padStart(2, '0')).join('');
+  },
+];   // async jobs finished before the first frame, e.g. async () => { LOGO = await loadLogoParts('brand/logo.svg'); }
+const FONTS = [];                                      // loaded in PRELOAD (they depend on the brand)  // every font render() sets
+const UNDER = null;   // Level 3: { src: 'clip.mp4', rect: [0, 960, 1080, 960] } plays a clip under the canvas
+
+// ── 2 · Helpers (pure: safe to call from render) ───────────────────────────
+const TAU = Math.PI * 2;
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const seg = (t, a, b) => clamp((t - a) / (b - a));          // 0→1 progress of t through [a, b] seconds
+const ease = {
+  linear: k => k,                                            // for scrubbing only; motion should ease
+  in: k => k * k * k,
+  out: k => 1 - (1 - k) ** 3,
+  inOut: k => (k < 0.5 ? 4 * k ** 3 : 1 - (-2 * k + 2) ** 3 / 2),
+  outQuint: k => 1 - (1 - k) ** 5,
+  inOutQuint: k => (k < 0.5 ? 16 * k ** 5 : 1 - (-2 * k + 2) ** 5 / 2),
+  inOutSine: k => -(Math.cos(Math.PI * k) - 1) / 2,
+  outBack: k => { const c = 1.70158; return 1 + (c + 1) * (k - 1) ** 3 + c * (k - 1) ** 2; },
+};
+const wrap = t => ((t % DURATION) + DURATION) % DURATION;
+const phase = t => wrap(t) / DURATION;                       // 0→1 across one loop
+// Periodic motion that completes whole cycles per loop, so the seam is invisible.
+const wave = (t, cycles = 1, offset = 0) => Math.sin(TAU * (cycles * t / DURATION + offset));
+// Frame index: identical at t = 0 and t = DURATION. Drives grain and stepped ("on twos") looks.
+const frameOf = (t, fps = FPS) => Math.floor(wrap(t) * fps + 1e-6);
+const stepped = (t, fps = 12) => frameOf(t, fps) / fps;
+
+// Seeded randomness. Use these, never Math.random(), so every frame is reproducible.
+function hash(i, seed = 0) {                                 // integer i → [0, 1)
+  let x = (Math.imul(i | 0, 0x27d4eb2d) ^ Math.imul((seed | 0) + 0x9e3779b9, 0x165667b1)) | 0;
+  x = Math.imul(x ^ (x >>> 15), 0x85ebca6b);
+  x = Math.imul(x ^ (x >>> 13), 0xc2b2ae35);
+  return ((x ^ (x >>> 16)) >>> 0) / 4294967296;
+}
+const hash2 = (x, y, seed = 0) => hash(((x | 0) * 73856093) ^ ((y | 0) * 19349663), seed);
+function noise(x, y = 0, seed = 0) {                         // smooth value noise → [0, 1]
+  const xi = Math.floor(x), yi = Math.floor(y), s = k => k * k * (3 - 2 * k);
+  const u = s(x - xi), v = s(y - yi);
+  return lerp(lerp(hash2(xi, yi, seed), hash2(xi + 1, yi, seed), u),
+              lerp(hash2(xi, yi + 1, seed), hash2(xi + 1, yi + 1, seed), u), v);
+}
+function fbm(x, y = 0, seed = 0, octaves = 4) {
+  let sum = 0, amp = 0.5, f = 1, norm = 0;
+  for (let o = 0; o < octaves; o++) { sum += amp * noise(x * f, y * f, seed + o * 17); norm += amp; amp *= 0.5; f *= 2; }
+  return sum / norm;
+}
+// Noise that returns to its start each loop (walks a circle through noise space).
+function loopNoise(t, seed = 0, radius = 1.5, octaves = 3) {
+  const a = TAU * phase(t);
+  return fbm(10 + Math.cos(a) * radius, 10 + Math.sin(a) * radius, seed, octaves);
+}
+
+// Colour
+function rgb(hex) {
+  const h = hex.replace('#', ''), n = parseInt(h.length < 6 ? h.replace(/./g, c => c + c) : h.slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+const rgba = (hex, a = 1) => { const [r, g, b] = rgb(hex); return `rgba(${r},${g},${b},${a})`; };
+const mix = (a, b, k) => '#' + rgb(a).map((v, i) => Math.round(lerp(v, rgb(b)[i], k)).toString(16).padStart(2, '0')).join('');
+function luminance(hex) {
+  const [r, g, b] = rgb(hex).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+const contrast = (a, b) => { const [x, y] = [luminance(a), luminance(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+// Whichever option reads best on bg: auto contrast for light and dark brands.
+const readable = (bg, ...options) => options.reduce((best, c) => (contrast(bg, c) > contrast(bg, best) ? c : best));
+
+// Layout for any format: u = 1px at 1080 on the short side; safe = the box inside the margins.
+function stage(w, h, margin = 0.07) {
+  const u = Math.min(w, h) / 1080, m = Math.round(Math.min(w, h) * margin), aspect = w / h;
+  return { u, w, h, aspect, cx: w / 2, cy: h / 2,
+           portrait: aspect < 0.8, square: aspect >= 0.8 && aspect <= 1.25, landscape: aspect > 1.25,
+           safe: { x: m, y: m, w: w - 2 * m, h: h - 2 * m } };
+}
+
+// Cached surfaces: built once per size, deterministic, so render stays pure.
+const _cache = new Map();
+function cached(key, make) { if (!_cache.has(key)) _cache.set(key, make()); return _cache.get(key); }
+function surface(w, h) { const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h)); return c; }
+
+// A ground that is never a flat fill: base colour, soft mottling, faint fibres.
+function ground(ctx, w, h, color, { seed = 1, mottle = 0.07, fibres = 0.05 } = {}) {
+  const tex = cached(`ground:${w}x${h}:${color}:${seed}:${mottle}:${fibres}`, () => {
+    const c = surface(w, h), g = c.getContext('2d'), u = Math.min(w, h) / 1080;
+    g.fillStyle = color; g.fillRect(0, 0, w, h);
+    const nw = 96, nh = Math.max(2, Math.round(96 * h / w)), n = surface(nw, nh), ng = n.getContext('2d');
+    const img = ng.createImageData(nw, nh);
+    for (let y = 0; y < nh; y++) for (let x = 0; x < nw; x++) {
+      const v = Math.round(fbm(x / 11, y / 11, seed) * 255), i = (y * nw + x) * 4;
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255;
+    }
+    ng.putImageData(img, 0, 0);
+    g.save(); g.globalAlpha = mottle * 2; g.globalCompositeOperation = 'overlay';
+    g.imageSmoothingQuality = 'high'; g.drawImage(n, 0, 0, w, h); g.restore();
+    g.save(); g.globalAlpha = fibres; g.strokeStyle = luminance(color) > 0.35 ? '#000' : '#fff';
+    g.lineWidth = Math.max(0.6, 0.9 * u); g.lineCap = 'round';
+    for (let i = 0, count = Math.round((w * h) / 3800); i < count; i++) {
+      const x = hash(i, seed + 1) * w, y = hash(i, seed + 2) * h, len = (6 + hash(i, seed + 3) * 24) * u, a = hash(i, seed + 4) * TAU;
+      g.beginPath(); g.moveTo(x, y);
+      g.quadraticCurveTo(x + Math.cos(a + 0.7) * len * 0.5, y + Math.sin(a + 0.7) * len * 0.5, x + Math.cos(a) * len, y + Math.sin(a) * len);
+      g.stroke();
+    }
+    g.restore();
+    return c;
+  });
+  ctx.drawImage(tex, 0, 0, w, h);
+}
+
+// Grain that re-rolls fps times a second (by frame index, so it loops). Specks both lighten and
+// darken, so it shows on dark and light grounds. amount ≈ 0.05–0.15; size = grain px at 1080.
+// 2 px grain changing 15×/s reads as film and keeps MP4s small; 1 px at 30 fps triples the file size.
+function grain(ctx, w, h, t, amount = 0.08, { fps = 15, size = 2 } = {}) {
+  const px = Math.max(1, Math.round(size * Math.min(w, h) / 1080)), cells = 256;
+  const tiles = cached(`grain:${px}`, () => Array.from({ length: 6 }, (_, k) => {
+    const small = surface(cells, cells), sg = small.getContext('2d'), img = sg.createImageData(cells, cells), d = img.data;
+    for (let i = 0; i < cells * cells; i++) {
+      const v = hash(i, 101 + k), a = Math.abs(v - 0.5) * 2;
+      d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v > 0.5 ? 255 : 0; d[i * 4 + 3] = Math.round(a * a * 255);
+    }
+    sg.putImageData(img, 0, 0);
+    const c = surface(cells * px, cells * px), g = c.getContext('2d');
+    g.imageSmoothingEnabled = false; g.drawImage(small, 0, 0, cells * px, cells * px);
+    return c;
+  }));
+  const f = frameOf(t, fps), span = cells * px, pat = ctx.createPattern(tiles[f % tiles.length], 'repeat');
+  pat.setTransform(new DOMMatrix([1, 0, 0, 1, -Math.floor(hash(f, 7) * cells) * px, -Math.floor(hash(f, 8) * cells) * px]));
+  ctx.save(); ctx.globalAlpha = amount; ctx.fillStyle = pat; ctx.fillRect(0, 0, w, h); ctx.restore();
+}
+
+// Light falling across the frame. angle in degrees: 90 = light from the top.
+function falloff(ctx, w, h, angle = 110, strength = 0.14) {
+  const a = (angle * Math.PI) / 180, r = Math.hypot(w, h) / 2, dx = Math.cos(a) * r, dy = Math.sin(a) * r;
+  const g = ctx.createLinearGradient(w / 2 - dx, h / 2 - dy, w / 2 + dx, h / 2 + dy);
+  g.addColorStop(0, `rgba(255,255,255,${strength})`); g.addColorStop(0.55, 'rgba(255,255,255,0)');
+  g.addColorStop(1, `rgba(0,0,0,${strength * 0.9})`);
+  ctx.save(); ctx.fillStyle = g; ctx.fillRect(0, 0, w, h); ctx.restore();
+}
+function vignette(ctx, w, h, strength = 0.3, cx = 0.5, cy = 0.46) {
+  const r = Math.hypot(w, h) * 0.62, g = ctx.createRadialGradient(w * cx, h * cy, r * 0.28, w * cx, h * cy, r);
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, `rgba(0,0,0,${strength})`);
+  ctx.save(); ctx.fillStyle = g; ctx.fillRect(0, 0, w, h); ctx.restore();
+}
+
+// Type
+const fontOf = (weight, px, family, style = '') => `${style} ${weight} ${px}px "${family}"`.trim();
+function fitSize(ctx, text, maxWidth, maxPx, weight, family, minPx = 8) {  // largest size ≤ maxPx that fits
+  ctx.save(); ctx.font = fontOf(weight, 100, family); const w100 = ctx.measureText(text).width; ctx.restore();
+  return clamp((maxWidth / Math.max(1, w100)) * 100, minPx, maxPx);
+}
+// Break text into lines that fit, never leaving one word alone on the last line.
+function lines(ctx, text, maxWidth) {
+  const out = [];
+  let cur = '';
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const next = cur ? cur + ' ' + word : word;
+    if (cur && ctx.measureText(next).width > maxWidth) { out.push(cur); cur = word; } else cur = next;
+  }
+  if (cur) out.push(cur);
+  const n = out.length;
+  if (n > 1 && !out[n - 1].includes(' ')) {
+    const prev = out[n - 2].split(' ');
+    if (prev.length > 1) {
+      const last = prev.pop() + ' ' + out[n - 1];
+      if (ctx.measureText(last).width <= maxWidth) { out[n - 2] = prev.join(' '); out[n - 1] = last; }
+    }
+  }
+  return out;
+}
+
+// Images (the real files: logos, screenshots, references)
+const IMAGES = {};
+function loadImage(src) {
+  return new Promise((ok, no) => {
+    const im = new Image();
+    if (CAPTURE) im.crossOrigin = 'anonymous';   // scripts need an untainted canvas
+    im.onload = () => ok(im); im.onerror = () => no(new Error('could not load image ' + String(src).slice(0, 96)));
+    im.src = src;
+  });
+}
+function drawContain(ctx, img, x, y, w, h) {  // fit inside the box, centred, aspect kept
+  const s = Math.min(w / img.width, h / img.height), dw = img.width * s, dh = img.height * s;
+  ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+  return { x: x + (w - dw) / 2, y: y + (h - dh) / 2, w: dw, h: dh };
+}
+
+// ── 3 · The one function ───────────────────────────────────────────────────
+const POSTER = 4.5;                                   // frame 0 = the finished card
+
+function render(ctx, time, theme, w, h) {
+  const t = wrap(time + POSTER);
+  const S = stage(w, h), u = S.u;
+  const ink = readable(theme.bg, theme.ink, '#ffffff', '#111111');
+  ground(ctx, w, h, theme.bg, { seed: 12, mottle: 0.07, fibres: 0.035 });
+  falloff(ctx, w, h, 115, 0.1);
+
+  // Colour sweep: two diagonal bands (accent, then accent2) pass behind the logo, 1.3–3.2 s.
+  [[theme.accent, 1.3], [theme.accent2, 1.55]].forEach(([col, t0]) => {
+    const k = ease.inOut(seg(t, t0, t0 + 1.6));
+    if (k <= 0 || k >= 1) return;
+    const bw = w * 0.55, x = lerp(-bw - h * 0.4, w + h * 0.4, k);
+    ctx.save(); ctx.fillStyle = col; ctx.globalAlpha = 0.92;
+    ctx.beginPath(); ctx.moveTo(x, h); ctx.lineTo(x + h * 0.4, 0); ctx.lineTo(x + h * 0.4 + bw, 0); ctx.lineTo(x + bw, h); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  });
+
+  // The logo strikes in (0.5–1.2 s) and clears (6.8–7.5 s). A plate appears only when the real logo
+  // would not read on this ground.
+  const strike = ease.outQuint(seg(t, 0.5, 1.2)), out = ease.inOut(seg(t, 6.8, 7.5));
+  const vis = clamp(strike * 2) * (1 - out);
+  // Wordmarks get a wide box, icons a tall one: the logo's own aspect decides.
+  const aspect = IMAGES.logo ? IMAGES.logo.width / IMAGES.logo.height : 3;
+  const box = aspect > 1.8 ? { w: S.safe.w * 0.8, h: S.safe.h * 0.3 } : { w: S.safe.w * 0.62, h: S.safe.h * 0.5 };
+  const cy = S.cy - S.safe.h * 0.08;
+  if (IMAGES.logo && vis > 0) {
+    const sc = lerp(1.25, 1, strike) * lerp(1, 0.94, out);
+    ctx.save(); ctx.globalAlpha = vis; ctx.translate(S.cx, cy); ctx.scale(sc, sc);
+    const iw = IMAGES.logo.width, ih = IMAGES.logo.height, f = Math.min(box.w / iw, box.h / ih);
+    const needPlate = LOGO_INK && contrast(LOGO_INK, theme.bg) < 2;
+    if (needPlate) {
+      const pad = 36 * u;
+      ctx.fillStyle = readable(LOGO_INK, '#ffffff', '#111111');
+      ctx.beginPath(); ctx.roundRect(-iw * f / 2 - pad, -ih * f / 2 - pad, iw * f + 2 * pad, ih * f + 2 * pad, 24 * u); ctx.fill();
+    }
+    drawContain(ctx, IMAGES.logo, -box.w / 2, -box.h / 2, box.w, box.h);
+    ctx.restore();
+    const ring = seg(t, 0.95, 1.6);                                  // a ring flash as it lands
+    if (ring > 0 && ring < 1) {
+      ctx.strokeStyle = rgba(theme.accent, 0.6 * (1 - ring)); ctx.lineWidth = 3 * u;
+      ctx.beginPath(); ctx.arc(S.cx, cy, lerp(0.2, 0.75, ease.out(ring)) * S.safe.w, 0, TAU); ctx.stroke();
+    }
+  }
+
+  // The line lands word by word (2.8–3.8 s) and holds; it clears with the logo.
+  const line = PARAMS.line.replace('{Name}', BRAND.name || 'Brand');
+  const size = Math.min(76 * u, fitSize(ctx, line, S.safe.w * 0.9, 400, 500, theme.font));
+  ctx.font = fontOf(500, size, theme.font);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  const words = line.split(' '), full = ctx.measureText(line).width;
+  let x = S.cx - full / 2;
+  ctx.textAlign = 'left';
+  words.forEach((wd, i) => {
+    const k = ease.outQuint(seg(t, 2.8 + i * 0.12, 3.3 + i * 0.12)) * (1 - out);
+    const ww = ctx.measureText(wd + ' ').width;
+    if (k > 0.001) {
+      ctx.globalAlpha = k; ctx.fillStyle = ink;
+      ctx.fillText(wd, x, cy + box.h / 2 + 70 * u + size + (1 - k) * 24 * u);
+    }
+    x += ww;
+  });
+  ctx.globalAlpha = 1;
+
+  vignette(ctx, w, h, 0.16);
+  grain(ctx, w, h, t, 0.08);
+}
+
+// Optional sound written in code and locked to the loop (see assets/snippets/sound.js).
+// score(audioCtx, when, out) schedules one loop of audio starting at audio time `when`.
+const score = null;
+
+// ── 4 · Harness: player + the window.RISE contract the scripts use. Leave as is. ──
+const CAPTURE = new URLSearchParams(location.search).has('capture');
+if (CAPTURE) document.body.classList.add('capture');
+const ready = (async () => {
+  await Promise.all(FONTS.map(f => document.fonts.load(f).catch(() => null)));
+  const wanted = { ...ASSETS, ...(BRAND.logo ? { logo: BRAND.logo } : {}) };
+  await Promise.all(Object.entries(wanted).map(([k, src]) =>
+    loadImage(src).then(im => { IMAGES[k] = im; }).catch(e => console.error(e.message))));
+  for (const job of PRELOAD) await job();
+})();
+window.RISE = { version: 1, render, score, ready, DURATION, FPS, FORMATS, SIZES, THEME, PARAMS, BRAND, FONTS, UNDER };
+
+if (!CAPTURE) (async () => {
+  await ready;
+  const q = new URLSearchParams(location.search), $ = id => document.getElementById(id);
+  const view = $('view'), ctx = view.getContext('2d'), stageEl = $('stage');
+  let fmt = FORMATS.includes(q.get('format')) ? q.get('format') : FORMATS[0];
+  let playing = !q.has('t'), t = q.has('t') ? clamp(+q.get('t') || 0, 0, DURATION) : 0, last = performance.now();
+  let under = null;
+  if (UNDER) { under = document.createElement('video'); under.id = 'under'; under.src = UNDER.src; under.muted = true; under.playsInline = true; under.loop = true; stageEl.prepend(under); }
+
+  function layout() {
+    const [w, h] = SIZES[fmt] || [1920, 1080];
+    if (view.width !== w || view.height !== h) { view.width = w; view.height = h; }
+    const W = stageEl.clientWidth - 32, H = stageEl.clientHeight - 32, s = Math.min(W / w, H / h);
+    const left = (stageEl.clientWidth - w * s) / 2, top = (stageEl.clientHeight - h * s) / 2;
+    Object.assign(view.style, { width: w * s + 'px', height: h * s + 'px', left: left + 'px', top: top + 'px' });
+    if (under) {
+      const [rx, ry, rw, rh] = UNDER.rect || [0, 0, w, h];
+      Object.assign(under.style, { left: left + rx * s + 'px', top: top + ry * s + 'px', width: rw * s + 'px', height: rh * s + 'px' });
+    }
+  }
+  const fmtBox = $('formats');
+  for (const f of FORMATS) {
+    const b = document.createElement('button'); b.textContent = f; b.dataset.f = f;
+    b.onclick = () => { fmt = f; syncButtons(); layout(); };
+    fmtBox.append(b);
+  }
+  const syncButtons = () => fmtBox.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.f === fmt)));
+  syncButtons(); layout(); addEventListener('resize', layout);
+
+  const playBtn = $('play'), scrub = $('scrub'), timeEl = $('time');
+  const setPlaying = p => { playing = p; playBtn.textContent = p ? 'Pause' : 'Play'; if (under) p ? under.play().catch(() => {}) : under.pause(); };
+  playBtn.onclick = () => setPlaying(!playing);
+  scrub.oninput = () => { setPlaying(false); t = (scrub.value / 1000) * DURATION; };
+  addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' && e.key !== ' ') return;
+    if (e.key === ' ') { e.preventDefault(); setPlaying(!playing); }
+    else if (e.key === 'ArrowRight') { setPlaying(false); t = wrap(t + 1 / FPS); }
+    else if (e.key === 'ArrowLeft') { setPlaying(false); t = wrap(t - 1 / FPS); }
+    else if (/^[1-9]$/.test(e.key) && FORMATS[+e.key - 1]) { fmt = FORMATS[+e.key - 1]; syncButtons(); layout(); }
+  });
+  setPlaying(playing);
+
+  // Sound starts muted; when on, each loop's score is scheduled just before the loop begins.
+  const soundBtn = $('sound');
+  let actx = null, out = null, soundOn = false, scheduledFor = -1, loopCount = 0;
+  if (typeof score === 'function') {
+    soundBtn.hidden = false;
+    soundBtn.onclick = async () => {
+      if (!actx) { actx = new AudioContext(); out = actx.createGain(); out.connect(actx.destination); }
+      soundOn = !soundOn; await actx.resume(); out.gain.value = soundOn ? 1 : 0; scheduledFor = -1;
+      soundBtn.textContent = soundOn ? 'Sound on' : 'Sound off'; soundBtn.setAttribute('aria-pressed', String(soundOn));
+    };
+  }
+
+  function frame(now) {
+    const prev = t;
+    if (playing) t = (t + Math.min(0.1, (now - last) / 1000)) % DURATION;
+    last = now;
+    if (t < prev && playing) loopCount++;
+    if (soundOn && playing && DURATION - t < 0.3 && scheduledFor !== loopCount + 1) {
+      scheduledFor = loopCount + 1; score(actx, actx.currentTime + (DURATION - t), out);
+    }
+    if (under && playing && Math.abs(under.currentTime - (t % (under.duration || DURATION))) > 0.12) under.currentTime = t % (under.duration || DURATION);
+    if (under && !playing) under.currentTime = t % (under.duration || DURATION);
+    if (ctx.reset) ctx.reset(); else ctx.clearRect(0, 0, view.width, view.height);
+    ctx.save(); render(ctx, t, THEME, view.width, view.height); ctx.restore();
+    scrub.value = Math.round((t / DURATION) * 1000);
+    timeEl.textContent = `${t.toFixed(2)} / ${DURATION.toFixed(2)}s`;
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

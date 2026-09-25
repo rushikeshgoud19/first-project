@@ -1,0 +1,23 @@
+{
+  "skill_name": "rise-motion",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "make me a 5 second looping animated bar chart for my Q3 deck, the bars are 12, 19, 27 and 41 (the last one is this quarter), title 'Numbers that move', editorial paper look, 16:9 and 9:16",
+      "expected_output": "motion/<slug>/index.html built from the template (Field Notes style), brief.md, a passing check.py run with contact sheets for 16:9 and 9:16, the bar values and title exactly as given, one accent on the last bar",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "can you do a logo reveal for claude.com with a little 3 second jingle? use their real logo and colours, square format, and give me the mp4",
+      "expected_output": "brand scraped with brand_scrape.py (no Firecrawl), the real logo file used (not redrawn), score() with a jingle locked to the motion, check.py passing, a 1080x1080 MP4 with an audio track",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "swiss poster style kinetic type loop of the word 'Motion' with the weight waving through the letters and a red dot. I need it for reels (9:16) and youtube (16:9)",
+      "expected_output": "Swiss kinetic type style spec followed (variable weight wave, grid, one red disc), fonts loaded, no clipped letters, check.py passing in both formats, exports on request",
+      "files": []
+    }
+  ]
+}
